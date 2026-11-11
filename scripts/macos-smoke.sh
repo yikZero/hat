@@ -41,6 +41,13 @@ trap cleanup EXIT
 echo "== lite mode"
 if "$HAT" create smoke-lite --mode lite --proxy "$PROXY" --tz America/New_York --locale en_US.UTF-8 </dev/null >/dev/null; then
   ok "create lite profile"
+  "$HAT" preflight smoke-lite --force && ok "preflight (proxy + exit IP)" || bad "preflight (see above)"
+  "$HAT" --json preflight smoke-lite | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ok"] and d["data"]["cached"]' \
+    && ok "preflight cached + JSON envelope" || bad "preflight cache/JSON"
+  "$HAT" set smoke-lite checks.expect_country=ZZ >/dev/null
+  expect_code "expect_country mismatch blocks launch" 125 "$HAT" run smoke-lite -- true
+  "$HAT" set smoke-lite checks.expect_country= >/dev/null
+  expect_code "rm without --yes refused (no TTY)" 2 "$HAT" rm smoke-lite
   "$HAT" check smoke-lite && ok "hat check smoke-lite" || bad "hat check smoke-lite (see above)"
   expect_code "exit code passthrough" 42 "$HAT" run smoke-lite -- sh -c 'exit 42'
   expect_code "signal exit code (SIGTERM => 143)" 143 "$HAT" run smoke-lite -- sh -c 'kill -TERM $$'
@@ -70,7 +77,7 @@ if [ "$LITE_ONLY" = 0 ]; then
     expect_code "unshared cwd refused" 125 sh -c "cd /tmp && '$HAT' run smoke-vm -- true"
     "$HAT" stop smoke-vm >/dev/null && ok "stop" || bad "stop"
     t0=$(now); out=$("$HAT" run smoke-vm -- hostname); [ "$out" = smoke-box ] && ok "restart + hostname ($(python3 -c "print(round($(now)-$t0))" 2>/dev/null)s)" || bad "restart: $out"
-    pid=$("$HAT" status smoke-vm --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["pid"])' 2>/dev/null)
+    pid=$("$HAT" status smoke-vm --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["pid"])' 2>/dev/null)
     [ -n "$pid" ] && kill -9 "$pid"; sleep 1
     out=$("$HAT" run smoke-vm -- echo recovered 2>&1); [ "$out" = recovered ] && ok "recovery after daemon crash" || bad "recovery after daemon crash: $out"
   else

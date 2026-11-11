@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"net"
 	"os"
@@ -18,6 +19,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"hat/internal/clierr"
+
 	"hat/internal/config"
 	"hat/internal/lite"
 	"hat/internal/seatbelt"
@@ -27,22 +30,54 @@ import (
 	"hat/internal/vm"
 )
 
-type checker struct{ failed int }
+type checkItem struct {
+	Name   string `json:"name"`
+	Status string `json:"status"` // pass | fail | warn | info
+	Detail string `json:"detail,omitempty"`
+}
 
-func (c *checker) result(ok bool, name, detail string) {
-	mark := "PASS"
-	if !ok {
-		mark = "FAIL"
-		c.failed++
+type checker struct {
+	failed int
+	Items  []checkItem
+}
+
+func (c *checker) add(status, name, detail string) {
+	c.Items = append(c.Items, checkItem{name, status, detail})
+	if jsonOut {
+		return
 	}
 	if detail != "" {
 		detail = " — " + detail
 	}
-	fmt.Printf("  [%s] %s%s\n", mark, name, detail)
+	fmt.Printf("  [%s] %s%s\n", strings.ToUpper(status), name, detail)
 }
 
-func (c *checker) info(name, detail string) { fmt.Printf("  [info] %s: %s\n", name, detail) }
-func (c *checker) warn(name, detail string) { fmt.Printf("  [WARN] %s: %s\n", name, detail) }
+func (c *checker) result(ok bool, name, detail string) {
+	if ok {
+		c.add("pass", name, detail)
+	} else {
+		c.failed++
+		c.add("fail", name, detail)
+	}
+}
+
+func (c *checker) info(name, detail string) { c.add("info", name, detail) }
+func (c *checker) warn(name, detail string) { c.add("warn", name, detail) }
+
+// finishChecks prints/emits the summary and returns the exit status.
+func (c *checker) finish(subject string) (int, error) {
+	if jsonOut {
+		emit(map[string]any{"subject": subject, "ok": c.failed == 0, "failed": c.failed, "items": c.Items})
+	} else if c.failed > 0 {
+		fmt.Printf("\n%d check(s) FAILED\n", c.failed)
+	} else {
+		fmt.Println("\nAll checks passed.")
+	}
+	if c.failed > 0 {
+		return 0, exitError{5}
+	}
+	return 0, nil
+}
 
 type ipInfo struct {
 	IP       string `json:"ip"`
@@ -67,7 +102,13 @@ func parseIPInfo(out string) (ipInfo, bool) {
 const egressProbe = `curl -fsS --max-time 20 https://ipinfo.io/json 2>/dev/null || curl -fsS --max-time 20 'http://ip-api.com/json/?fields=query,country,timezone'`
 
 func cmdCheck(args []string) (int, error) {
-	name, err := needName(args, "check <profile>")
+	fs := flag.NewFlagSet("check", flag.ContinueOnError)
+	jsonFlag(fs)
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return 2, err
+	}
+	name, err := needName(pos, "check <profile> [--json]")
 	if err != nil {
 		return 2, err
 	}
@@ -75,7 +116,9 @@ func cmdCheck(args []string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	fmt.Printf("Checking profile %q (%s mode, proxy %s)\n", p.Name, p.Mode, upstream.Redact(p.Proxy.URL))
+	if !jsonOut {
+		fmt.Printf("Checking profile %q (%s mode, proxy %s)\n", p.Name, p.Mode, upstream.Redact(p.Proxy.URL))
+	}
 	c := &checker{}
 	if p.Mode == config.ModeLite {
 		err = checkLite(p, c)
@@ -85,12 +128,7 @@ func cmdCheck(args []string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	if c.failed > 0 {
-		fmt.Printf("\n%d check(s) FAILED\n", c.failed)
-		return 1, nil
-	}
-	fmt.Println("\nAll checks passed.")
-	return 0, nil
+	return c.finish(p.Name)
 }
 
 func liteOut(p *config.Profile, script string) (string, int) {
@@ -146,7 +184,7 @@ func vmOut(ctx context.Context, cl *ssh.Client, script string) (string, int) {
 func checkVM(p *config.Profile, c *checker) error {
 	ctx := context.Background()
 	if err := vm.EnsureRunning(ctx, p, os.Stderr); err != nil {
-		return err
+		return clierr.Wrap(clierr.VMFailed, "hat debug-bundle "+p.Name, err)
 	}
 	cl, err := vm.Connect(ctx, p)
 	if err != nil {
@@ -208,8 +246,15 @@ func pathHasFirst(dir string) bool {
 }
 
 func cmdDoctor(args []string) (int, error) {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	jsonFlag(fs)
+	if _, err := parseArgs(fs, args); err != nil {
+		return 2, err
+	}
 	c := &checker{}
-	fmt.Printf("%s %s on %s/%s\n", config.App, Version, runtime.GOOS, runtime.GOARCH)
+	if !jsonOut {
+		fmt.Printf("%s %s on %s/%s\n", config.App, Version, runtime.GOOS, runtime.GOARCH)
+	}
 	c.result(runtime.GOOS == "darwin", "macOS", "")
 	c.result(runtime.GOARCH == "arm64", "Apple Silicon (vm mode)", "")
 	_, err := os.Stat(lite.SandboxExec)
@@ -231,17 +276,16 @@ func cmdDoctor(args []string) (int, error) {
 			got, err := exec.LookPath(n)
 			c.result(err == nil && filepath.Dir(got) == bin, "shim "+n+" wins on PATH", got)
 		}
-		fmt.Println("  (after changing PATH run `hash -r` / `rehash`; IDEs and GUI apps may not use your shell PATH)")
+		if !jsonOut {
+			fmt.Println("  (after changing PATH run `hash -r` / `rehash`; IDEs and GUI apps may not use your shell PATH)")
+		}
 	}
 	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"} {
 		if v := os.Getenv(k); v != "" {
 			c.info("host "+k, upstream.Redact(v)+" (hat ignores it; profiles always use their own proxy)")
 		}
 	}
-	if c.failed > 0 {
-		return 1, nil
-	}
-	return 0, nil
+	return c.finish("doctor")
 }
 
 func cmdDebugBundle(args []string) error {

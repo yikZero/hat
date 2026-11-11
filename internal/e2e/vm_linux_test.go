@@ -69,7 +69,8 @@ func setup(t *testing.T) *harness {
 	os.WriteFile(filepath.Join(h.home, "images", "debian-13.raw"), make([]byte, 1<<20), 0o600)
 	h.proxy = testproxy.StartSOCKS5("", "")
 	t.Cleanup(h.proxy.Close)
-	h.env = append(os.Environ(), "HAT_HOME="+h.home, "HAT_VFKIT="+h.fakeVF, "HOME="+tmp)
+	h.env = append(os.Environ(), "HAT_HOME="+h.home, "HAT_VFKIT="+h.fakeVF, "HOME="+tmp,
+		"HAT_SKIP_PREFLIGHT=1") // preflight needs macOS + internet; covered by internal/preflight tests
 	if _, e, code := h.run("", "create", "e2e", "--proxy", "socks5://"+h.proxy.Addr(), "--allow-local-upstream",
 		"--tz", "Asia/Tokyo", "--locale", "ja_JP.UTF-8", "--share", h.share); code != 0 {
 		t.Fatalf("create: %s", e)
@@ -144,13 +145,16 @@ func TestVMLifecycle(t *testing.T) {
 	}
 
 	// crash recovery: kill -9 the daemon; the next run must recover
-	var st struct{ PID int }
+	var st struct {
+		OK   bool
+		Data struct{ PID int }
+	}
 	o, _, _ := h.run("", "status", "e2e", "--json")
 	json.Unmarshal([]byte(o), &st)
-	if st.PID == 0 {
+	if !st.OK || st.Data.PID == 0 {
 		t.Fatal("no daemon pid")
 	}
-	syscall.Kill(st.PID, syscall.SIGKILL)
+	syscall.Kill(st.Data.PID, syscall.SIGKILL)
 	time.Sleep(300 * time.Millisecond)
 	out, errOut, code = h.run("", "run", "e2e", "--", "echo", "recovered")
 	if code != 0 || out != "recovered\n" {

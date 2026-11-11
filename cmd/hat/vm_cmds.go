@@ -2,13 +2,13 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"time"
 
+	"hat/internal/clierr"
 	"hat/internal/config"
 	"hat/internal/vm"
 )
@@ -23,7 +23,7 @@ func loadVM(args []string, usage string) (*config.Profile, error) {
 		return nil, err
 	}
 	if p.Mode != config.ModeVM {
-		return nil, fmt.Errorf("profile %q is in %s mode (no VM)", name, p.Mode)
+		return nil, usageErr("profile %q is in %s mode (no VM)", name, p.Mode)
 	}
 	return p, nil
 }
@@ -34,7 +34,10 @@ func cmdStart(args []string) error {
 		return err
 	}
 	if err := vm.EnsureRunning(context.Background(), p, os.Stderr); err != nil {
-		return err
+		return clierr.Wrap(clierr.VMFailed, "hat debug-bundle "+p.Name, err)
+	}
+	if jsonOut {
+		return emit(map[string]string{"profile": p.Name, "state": "ready"})
 	}
 	fmt.Printf("VM for %q is ready\n", p.Name)
 	return nil
@@ -49,10 +52,16 @@ func cmdStop(args []string) error {
 	defer cancel()
 	if err := vm.Stop(ctx, p.Name); err != nil {
 		if errors.Is(err, vm.ErrNotRunning) {
+			if jsonOut {
+				return emit(map[string]string{"profile": p.Name, "state": "stopped"})
+			}
 			fmt.Println("Not running.")
 			return nil
 		}
 		return err
+	}
+	if jsonOut {
+		return emit(map[string]string{"profile": p.Name, "state": "stopped"})
 	}
 	fmt.Println("Stopped.")
 	return nil
@@ -60,7 +69,7 @@ func cmdStop(args []string) error {
 
 func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
-	asJSON := fs.Bool("json", false, "JSON output")
+	jsonFlag(fs)
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -71,16 +80,17 @@ func cmdStatus(args []string) error {
 	}
 	st, err := vm.Status(context.Background(), p.Name)
 	if errors.Is(err, vm.ErrNotRunning) {
+		if jsonOut {
+			return emit(vm.CtlResponse{V: vm.ProtoVersion, OK: true, State: "stopped"})
+		}
 		fmt.Println("stopped")
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	if *asJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(st)
+	if jsonOut {
+		return emit(st)
 	}
 	fmt.Printf("state       %s\nupstream    %s\nsessions    %d\nconnections %d via proxy, %d failed (blocked), %d refused\nudp dropped %d\ndns queries %d\n",
 		st.State, st.Upstream, st.Sessions, st.UpstreamOK, st.UpstreamFailed, st.Refused, st.UDPDropped, st.DNSQueries)

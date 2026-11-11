@@ -7,8 +7,13 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
+	"golang.org/x/crypto/ssh"
+
+	"hat/internal/clierr"
 	"hat/internal/config"
 	"hat/internal/lite"
 	"hat/internal/session"
@@ -47,7 +52,7 @@ func cmdRun(args []string) (int, error) {
 		cmd, pos = pos[1:], pos[:1]
 	}
 	if len(pos) != 1 || len(cmd) == 0 {
-		return 2, fmt.Errorf("usage: %s run <profile> [--home] -- <command> [args...]", config.App)
+		return 2, usageErr("usage: %s run <profile> [--home] -- <command> [args...]", config.App)
 	}
 	p, err := config.Load(pos[0])
 	if err != nil {
@@ -78,13 +83,20 @@ func cmdShell(args []string) (int, error) {
 
 func runInProfile(p *config.Profile, argv []string, o runOpts) (int, error) {
 	if active := os.Getenv(config.EnvActive); active != "" {
-		return 1, fmt.Errorf("already inside profile %q; nested profiles are not supported", active)
+		return 1, usageErr("already inside profile %q; nested profiles are not supported", active)
 	}
 	if p.Mode == config.ModeLite {
+		if err := runPreflight(p); err != nil {
+			return 1, err
+		}
 		if err := shim.EnsureHelpers(lite.OpenURLHelper); err != nil {
 			return 1, err
 		}
-		return lite.Run(p, lite.Options{Argv: argv})
+		code, err := lite.Run(p, lite.Options{Argv: argv, Quiet: quietOut})
+		if err != nil && code == 127 {
+			err = clierr.Wrap(clierr.CommandNotFound, "install it on this Mac, or check PATH", err)
+		}
+		return code, err
 	}
 	return runVM(p, argv, o)
 }
@@ -99,19 +111,33 @@ func runVM(p *config.Profile, argv []string, o runOpts) (int, error) {
 		if _, ok := p.SharedPath(cwd); ok {
 			dir = cwd
 		} else if !o.shell {
-			return 125, fmt.Errorf("the current directory %s is not shared with profile %q.\n"+
-				"  share it:  %s share add %s %s\n  or run in the VM home:  %s run %s --home -- ...",
-				cwd, p.Name, config.App, p.Name, shellQuote(cwd), config.App, p.Name)
+			return 125, clierr.New(clierr.NotShared,
+				fmt.Sprintf("%s share add %s %s   (or run in the VM home: %s run %s --home -- ...)",
+					config.App, p.Name, session.Quote(cwd), config.App, p.Name),
+				"the current directory %s is not shared with profile %q", cwd, p.Name)
 		}
+	}
+	if err := runPreflight(p); err != nil {
+		return 1, err
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 	defer cancel()
-	if err := vm.EnsureRunning(ctx, p, os.Stderr); err != nil {
-		return 1, err
-	}
-	client, err := vm.Connect(ctx, p)
-	if err != nil {
-		return 1, fmt.Errorf("connecting to the VM: %w", err)
+	var client *ssh.Client
+	for attempt := 0; ; attempt++ {
+		if err := vm.EnsureRunning(ctx, p, os.Stderr); err != nil {
+			return 1, clierr.Wrap(clierr.VMFailed, "hat debug-bundle "+p.Name, err)
+		}
+		c, err := vm.Connect(ctx, p)
+		if err == nil {
+			client = c
+			break
+		}
+		// The VM may be shutting down (idle stop) right now: start it again.
+		if attempt < 2 && strings.Contains(err.Error(), "stopping") {
+			time.Sleep(time.Second)
+			continue
+		}
+		return 1, clierr.Wrap(clierr.VMFailed, "hat status "+p.Name, fmt.Errorf("connecting to the VM: %w", err))
 	}
 	defer client.Close()
 	env := map[string]string{
@@ -136,8 +162,6 @@ func runVM(p *config.Profile, argv []string, o runOpts) (int, error) {
 	return code, err
 }
 
-func shellQuote(s string) string { return session.Quote(s) }
-
 // runShim handles invocation through a shim symlink (argv[0] = shim name).
 func runShim(name string, args []string) (int, error) {
 	f, err := shim.Load()
@@ -146,7 +170,7 @@ func runShim(name string, args []string) (int, error) {
 	}
 	e, ok := f.Shims[name]
 	if !ok {
-		return 127, fmt.Errorf("%s is a hat shim but is not registered (see: %s shim list)", name, config.App)
+		return 127, clierr.New(clierr.NotFound, config.App+" shim list", "%s is not a registered hat shim", name)
 	}
 	profile, nested, err := shim.Resolve(e, os.Getenv)
 	if err != nil {
@@ -165,7 +189,7 @@ func runShim(name string, args []string) (int, error) {
 	}
 	p, err := config.Load(profile)
 	if err != nil {
-		return 1, fmt.Errorf("shim %s: %w (the command was NOT run)", name, err)
+		return 1, clierr.Wrap(clierr.NotFound, "", fmt.Errorf("shim %s: %w (the command was NOT run)", name, err))
 	}
 	argv := append([]string{e.Command}, args...)
 	if p.Mode == config.ModeLite {
@@ -189,6 +213,21 @@ func cmdShim(args []string) error {
 		f, err := shim.Load()
 		if err != nil {
 			return err
+		}
+		if jsonOut || (len(args) > 1 && args[1] == "--json") {
+			type sv struct {
+				Name    string `json:"name"`
+				Command string `json:"command"`
+				Profile string `json:"profile"`
+				Pinned  bool   `json:"pinned"`
+				Real    string `json:"real,omitempty"`
+			}
+			out := []sv{}
+			for _, n := range f.Names() {
+				e := f.Shims[n]
+				out = append(out, sv{n, e.Command, e.Profile, e.Pinned, e.Real})
+			}
+			return emit(out)
 		}
 		bin, _ := config.BinDir()
 		if len(f.Shims) == 0 {

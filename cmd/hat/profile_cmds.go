@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/term"
 
+	"hat/internal/clierr"
 	"hat/internal/config"
 	"hat/internal/secret"
 	"hat/internal/shim"
@@ -45,9 +46,12 @@ func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 
 func needName(pos []string, usage string) (string, error) {
 	if len(pos) != 1 {
-		return "", fmt.Errorf("usage: %s %s", config.App, usage)
+		return "", usageErr("usage: %s %s", config.App, usage)
 	}
-	return pos[0], config.ValidName(pos[0])
+	if err := config.ValidName(pos[0]); err != nil {
+		return "", clierr.Wrap(clierr.Usage, "", err)
+	}
+	return pos[0], nil
 }
 
 func cmdCreate(args []string) error {
@@ -66,6 +70,11 @@ func cmdCreate(args []string) error {
 	mem := fs.Int("memory", 0, "VM memory in MB (default 2048)")
 	disk := fs.Int("disk", 0, "VM disk in GB (default 16)")
 	start := fs.Bool("start", false, "vm: boot the VM now")
+	pwStdin := fs.Bool("password-stdin", false, "read the proxy password from stdin (one line)")
+	existsOK := fs.Bool("exists-ok", false, "succeed without changes if the profile already exists")
+	expectCountry := fs.String("expect-country", "", "refuse to run unless the exit IP is in this country (ISO code, e.g. US)")
+	checks := fs.String("checks", "", "launch checklist: off | quick | full (default full)")
+	jsonFlag(fs)
 	var shares multiFlag
 	fs.Var(&shares, "share", "directory to share with the profile (repeatable)")
 	pos, err := parseArgs(fs, args)
@@ -77,14 +86,25 @@ func cmdCreate(args []string) error {
 		return err
 	}
 	if existing, _ := config.List(); contains(existing, name) {
-		return fmt.Errorf("profile %q already exists", name)
+		if *existsOK {
+			p, err := config.Load(name)
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				return emit(viewOf(p))
+			}
+			fmt.Printf("Profile %q already exists (unchanged).\n", name)
+			return nil
+		}
+		return clierr.New(clierr.Exists, "use --exists-ok, or change it with: hat set "+name+" KEY=VALUE", "profile %q already exists", name)
 	}
 	if *proxy == "" {
-		return errors.New("--proxy is required (every profile must use a proxy)")
+		return usageErr("--proxy is required (every profile must use a proxy)")
 	}
 	u, err := url.Parse(*proxy)
 	if err != nil {
-		return fmt.Errorf("--proxy: %w", err)
+		return usageErr("--proxy: %v", err)
 	}
 	password, hasPassword := "", false
 	if u.User != nil {
@@ -116,6 +136,12 @@ func cmdCreate(args []string) error {
 	if *disk > 0 {
 		p.VM.DiskGB = *disk
 	}
+	if *expectCountry != "" {
+		p.Checks.ExpectCountry = strings.ToUpper(*expectCountry)
+	}
+	if *checks != "" {
+		p.Checks.OnStart = *checks
+	}
 	p.Lite.IsolateHome = *isolateHome
 	p.Lite.AllowTrustd = *allowTrustd
 	for _, s := range shares {
@@ -126,14 +152,30 @@ func cmdCreate(args []string) error {
 		p.Share = append(p.Share, config.Share{Path: abs})
 	}
 	switch {
+	case *pwStdin:
+		if hasPassword {
+			return usageErr("--password-stdin: leave the password out of --proxy")
+		}
+		pw, err := readSecretStdin()
+		if err != nil {
+			return err
+		}
+		password = pw
+		p.Proxy.Password = config.PasswordFile
+		if pw == "" {
+			p.Proxy.Password = config.PasswordNone
+		}
 	case *keychain:
 		if hasPassword {
-			return errors.New("with --keychain, leave the password out of --proxy; you will be prompted")
+			return usageErr("with --keychain, leave the password out of --proxy; you will be prompted")
+		}
+		if !interactive() {
+			return clierr.New(clierr.InputRequired, "use --password-stdin instead", "--keychain needs an interactive terminal")
 		}
 		p.Proxy.Password = config.PasswordKeychain
 	case hasPassword:
 		p.Proxy.Password = config.PasswordFile
-	case u.User != nil && u.User.Username() != "" && term.IsTerminal(int(os.Stdin.Fd())):
+	case u.User != nil && u.User.Username() != "" && interactive():
 		pw, err := readPassword("Proxy password for " + u.User.Username() + " (empty for none): ")
 		if err != nil {
 			return err
@@ -143,7 +185,7 @@ func cmdCreate(args []string) error {
 		}
 	}
 	if err := p.Validate(); err != nil {
-		return err
+		return clierr.Wrap(clierr.Usage, "", err)
 	}
 	if err := p.Save(); err != nil {
 		return err
@@ -163,16 +205,21 @@ func cmdCreate(args []string) error {
 	if err != nil {
 		return err
 	}
+	if *start && p.Mode == config.ModeVM {
+		if err := vm.EnsureRunning(context.Background(), p, os.Stderr); err != nil {
+			return clierr.Wrap(clierr.VMFailed, "hat debug-bundle "+name, err)
+		}
+	}
+	if jsonOut {
+		return emit(viewOf(p))
+	}
 	fmt.Printf("Created profile %q (%s mode)\n", name, p.Mode)
 	fmt.Printf("  proxy     %s\n  timezone  %s\n  locale    %s\n", upstream.Redact(p.Proxy.URL), p.Timezone, p.Locale)
 	if p.Mode == config.ModeVM {
 		fmt.Printf("  hostname  %s\n  machine   %s\n  mac       %s\n", p.VM.Hostname, st.MachineID, st.MAC)
 	}
-	fmt.Printf("\nNext:\n  %s check %s\n  %s run %s -- <command>\n  %s shim add <command> --profile %s\n",
+	fmt.Printf("\nNext:\n  %s preflight %s\n  %s run %s -- <command>\n  %s shim add <command> --profile %s\n",
 		config.App, name, config.App, name, config.App, name)
-	if *start && p.Mode == config.ModeVM {
-		return vm.EnsureRunning(context.Background(), p, os.Stderr)
-	}
 	return nil
 }
 
@@ -215,9 +262,23 @@ func contains(list []string, s string) bool {
 }
 
 func cmdList(args []string) error {
+	fs := flag.NewFlagSet("list", flag.ContinueOnError)
+	jsonFlag(fs)
+	if _, err := parseArgs(fs, args); err != nil {
+		return err
+	}
 	names, err := config.List()
 	if err != nil {
 		return err
+	}
+	if jsonOut {
+		views := []profileView{}
+		for _, n := range names {
+			if p, err := config.Load(n); err == nil {
+				views = append(views, viewOf(p))
+			}
+		}
+		return emit(views)
 	}
 	if len(names) == 0 {
 		fmt.Printf("No profiles yet. Create one with: %s create <name> --proxy socks5://user:pass@host:port\n", config.App)
@@ -244,13 +305,22 @@ func cmdList(args []string) error {
 }
 
 func cmdShow(args []string) error {
-	name, err := needName(args, "show <profile>")
+	fs := flag.NewFlagSet("show", flag.ContinueOnError)
+	jsonFlag(fs)
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	name, err := needName(pos, "show <profile> [--json]")
 	if err != nil {
 		return err
 	}
 	p, err := config.Load(name)
 	if err != nil {
 		return err
+	}
+	if jsonOut {
+		return emit(viewOf(p))
 	}
 	dir, _ := config.Dir(name)
 	b, err := os.ReadFile(filepath.Join(dir, "profile.toml"))
@@ -273,6 +343,9 @@ func cmdEdit(args []string) error {
 	}
 	if _, err := config.Load(name); err != nil {
 		return err
+	}
+	if !interactive() {
+		return clierr.New(clierr.InputRequired, "use: hat set "+name+" KEY=VALUE", "edit needs an interactive terminal")
 	}
 	dir, _ := config.Dir(name)
 	file := filepath.Join(dir, "profile.toml")
@@ -338,7 +411,10 @@ func cmdRemove(args []string) error {
 	}
 	dir, _ := config.Dir(name)
 	if _, err := os.Stat(dir); err != nil {
-		return fmt.Errorf("profile %q does not exist", name)
+		return clierr.New(clierr.NotFound, "hat list", "profile %q does not exist", name)
+	}
+	if !*yes && !interactive() {
+		return clierr.New(clierr.InputRequired, "pass --yes to confirm", "refusing to delete profile %q without confirmation", name)
 	}
 	if !*yes {
 		fmt.Printf("Delete profile %q, its VM disk and all data inside it? [y/N] ", name)
@@ -368,6 +444,9 @@ func cmdRemove(args []string) error {
 	if err := os.RemoveAll(dir); err != nil {
 		return err
 	}
+	if jsonOut {
+		return emit(map[string]string{"deleted": name})
+	}
 	fmt.Printf("Deleted profile %q\n", name)
 	return nil
 }
@@ -376,6 +455,7 @@ func cmdProxyPassword(args []string) error {
 	fs := flag.NewFlagSet("proxy-password", flag.ContinueOnError)
 	keychain := fs.Bool("keychain", false, "store in the macOS Keychain")
 	none := fs.Bool("none", false, "the proxy needs no password")
+	pwStdin := fs.Bool("password-stdin", false, "read the password from stdin (one line)")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -393,12 +473,23 @@ func cmdProxyPassword(args []string) error {
 		secret.Delete(name)
 		p.Proxy.Password = config.PasswordNone
 	case *keychain:
+		if !interactive() {
+			return clierr.New(clierr.InputRequired, "use --password-stdin", "--keychain needs an interactive terminal")
+		}
 		if err := secret.SetKeychainInteractive(name); err != nil {
 			return err
 		}
 		p.Proxy.Password = config.PasswordKeychain
 	default:
-		pw, err := readPassword("Proxy password: ")
+		var pw string
+		switch {
+		case *pwStdin:
+			pw, err = readSecretStdin()
+		case interactive():
+			pw, err = readPassword("Proxy password: ")
+		default:
+			err = clierr.New(clierr.InputRequired, "use --password-stdin", "no terminal to prompt for the password")
+		}
 		if err != nil {
 			return err
 		}
@@ -410,7 +501,9 @@ func cmdProxyPassword(args []string) error {
 	if err := p.Save(); err != nil {
 		return err
 	}
-	fmt.Println("Saved. Restart a running VM to apply:", config.App, "stop", name)
+	if !quietOut && !jsonOut {
+		fmt.Println("Saved. Restart a running VM to apply:", config.App, "stop", name)
+	}
 	return nil
 }
 
