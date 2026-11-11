@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"encoding/base64"
 	"encoding/binary"
+	"hat/internal/netutil"
 	"io"
 	"net"
 	"net/http"
@@ -164,7 +165,7 @@ func (s *Server) serveSOCKS(c net.Conn) {
 	}
 	defer up.Close()
 	c.Write([]byte{5, 0, 0, 1, 0, 0, 0, 0, 0, 0})
-	pipe(c, up)
+	netutil.Pipe(c, up)
 }
 
 func (s *Server) serveHTTP(c net.Conn) {
@@ -196,21 +197,7 @@ func (s *Server) serveHTTP(c net.Conn) {
 		b, _ := br.Peek(br.Buffered())
 		up.Write(b)
 	}
-	pipe(c, up)
-}
-
-func pipe(a, b net.Conn) {
-	done := make(chan struct{}, 2)
-	go func() { io.Copy(a, b); closeWrite(a); done <- struct{}{} }()
-	go func() { io.Copy(b, a); closeWrite(b); done <- struct{}{} }()
-	<-done
-	<-done
-}
-
-func closeWrite(c net.Conn) {
-	if cw, ok := c.(interface{ CloseWrite() error }); ok {
-		cw.CloseWrite()
-	}
+	netutil.Pipe(c, up)
 }
 
 // StartEcho starts a TCP server that writes "hello:<first line>\n" back.

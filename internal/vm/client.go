@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -105,31 +106,21 @@ func daemonAlive(lockFile string) bool {
 }
 
 // EnsureRunning starts the daemon if needed and waits until the VM is ready.
-// Progress messages go to log.
+// It is safe to call concurrently from many processes: preparing the disk
+// and spawning the daemon happen under a per-profile start lock. If the
+// daemon is shutting down (e.g. idle stop) it waits for it to exit and
+// starts a new one. Progress messages go to log.
 func EnsureRunning(ctx context.Context, p *config.Profile, log io.Writer) error {
 	paths, err := PathsFor(p.Name)
 	if err != nil {
 		return err
 	}
-	if resp, err := Status(ctx, p.Name); err == nil && resp.State == "ready" {
-		return nil
+	if err := os.MkdirAll(paths.Run, 0o700); err != nil {
+		return err
 	}
-	if !daemonAlive(paths.LockFile) {
-		if err := Prepare(ctx, p, log); err != nil {
-			return err
-		}
-		if err := spawnDaemon(p.Name, paths); err != nil {
-			return err
-		}
-		first := !fileExists(paths.KnownHost)
-		if first {
-			fmt.Fprintf(log, "[hat] First start of profile %q: installing the guest (a few minutes, once)...\n", p.Name)
-		} else {
-			fmt.Fprintf(log, "[hat] Starting VM for profile %q...\n", p.Name)
-		}
-	}
-	deadline := time.Now().Add(12 * time.Minute)
-	lastState := ""
+	start := time.Now()
+	deadline := start.Add(12 * time.Minute)
+	spawns, lastState, announced := 0, "", false
 	for time.Now().Before(deadline) {
 		resp, err := Status(ctx, p.Name)
 		switch {
@@ -142,8 +133,25 @@ func EnsureRunning(ctx context.Context, p *config.Profile, log io.Writer) error 
 		}
 		if err == nil {
 			lastState = resp.State
-		} else if !daemonAlive(paths.LockFile) && time.Since(deadline.Add(-12*time.Minute)) > 5*time.Second {
-			return fmt.Errorf("VM daemon exited; see %s", paths.DaemonLog)
+		}
+		// No daemon (or the previous one finished stopping): start one.
+		if err != nil && !daemonAlive(paths.LockFile) {
+			if spawns >= 3 {
+				return fmt.Errorf("VM daemon keeps exiting; see %s", paths.DaemonLog)
+			}
+			first, err := startDaemonLocked(ctx, p, paths, log)
+			if err != nil {
+				return err
+			}
+			spawns++
+			if !announced && !quiet() {
+				announced = true
+				if first {
+					fmt.Fprintf(log, "[hat] First start of profile %q: installing the guest (a few minutes, once)...\n", p.Name)
+				} else {
+					fmt.Fprintf(log, "[hat] Starting VM for profile %q...\n", p.Name)
+				}
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -152,6 +160,46 @@ func EnsureRunning(ctx context.Context, p *config.Profile, log io.Writer) error 
 		}
 	}
 	return fmt.Errorf("timed out waiting for the VM; see %s", paths.DaemonLog)
+}
+
+func quiet() bool { return os.Getenv("HAT_QUIET") != "" }
+
+// startDaemonLocked prepares the profile and spawns the daemon while holding
+// the start lock, unless another process got there first.
+func startDaemonLocked(ctx context.Context, p *config.Profile, paths Paths, log io.Writer) (firstBoot bool, err error) {
+	unlock, err := lockFile(filepath.Join(paths.Run, "start.lock"))
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+	if daemonAlive(paths.LockFile) {
+		return false, nil // someone else started it while we waited
+	}
+	if err := Prepare(ctx, p, log); err != nil {
+		return false, err
+	}
+	if err := spawnDaemon(p.Name, paths); err != nil {
+		return false, err
+	}
+	// Hold the start lock until the new daemon owns its lock, so a
+	// concurrent caller does not spawn a second one.
+	for i := 0; i < 50 && !daemonAlive(paths.LockFile); i++ {
+		time.Sleep(100 * time.Millisecond)
+	}
+	return !fileExists(paths.KnownHost), nil
+}
+
+// lockFile takes an exclusive flock (blocking) and returns the unlock func.
+func lockFile(path string) (func(), error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return func() { unix.Flock(int(f.Fd()), unix.LOCK_UN); f.Close() }, nil
 }
 
 func spawnDaemon(name string, paths Paths) error {

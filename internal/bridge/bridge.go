@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"hat/internal/netutil"
 	"hat/internal/upstream"
 )
 
@@ -271,7 +272,7 @@ func (b *Bridge) serveSOCKS(c net.Conn) {
 	defer up.Close()
 	socksReply(c, 0x00)
 	c.SetDeadline(time.Time{})
-	pipe(c, up)
+	netutil.Pipe(c, up)
 }
 
 func socksReply(c net.Conn, code byte) {
@@ -362,7 +363,7 @@ func (h *httpHandler) connect(w http.ResponseWriter, r *http.Request) {
 		buf, _ := brw.Reader.Peek(n)
 		up.Write(buf)
 	}
-	pipe(c, up)
+	netutil.Pipe(c, up)
 }
 
 // App is used in user-facing error text.
@@ -401,23 +402,6 @@ func RandomToken() string {
 	b := make([]byte, 18)
 	rand.Read(b)
 	return base64.RawURLEncoding.EncodeToString(b)
-}
-
-func pipe(a, b net.Conn) {
-	var wg sync.WaitGroup
-	wg.Add(2)
-	cp := func(dst, src net.Conn) {
-		defer wg.Done()
-		io.Copy(dst, src)
-		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-			cw.CloseWrite()
-		} else {
-			dst.Close()
-		}
-	}
-	go cp(a, b)
-	go cp(b, a)
-	wg.Wait()
 }
 
 type peekedConn struct {

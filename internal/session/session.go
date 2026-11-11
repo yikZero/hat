@@ -20,6 +20,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
+
+	"hat/internal/netutil"
 )
 
 // Connect performs the SSH handshake over conn. The guest host key is
@@ -176,6 +178,7 @@ func Run(ctx context.Context, c *ssh.Client, r Request) (int, error) {
 		}()
 	}
 
+	ttyDelivers := netutil.TerminalDeliversSignals()
 	if err := s.Start(Command(r)); err != nil {
 		return 0, err
 	}
@@ -194,7 +197,7 @@ func Run(ctx context.Context, c *ssh.Client, r Request) (int, error) {
 				}
 				continue
 			}
-			if tty && (sig == syscall.SIGINT || sig == syscall.SIGQUIT) {
+			if tty && (sig == syscall.SIGINT || sig == syscall.SIGQUIT) && ttyDelivers {
 				continue // raw mode: ^C/^\ travel as bytes through the PTY
 			}
 			if name, ok := sigNames[sig]; ok {

@@ -68,6 +68,15 @@ func EnsureImage(ctx context.Context, name string, log io.Writer) (string, error
 	if err := os.MkdirAll(filepath.Dir(raw), 0o700); err != nil {
 		return "", err
 	}
+	// Serialize downloads of the same image across processes.
+	unlock, err := lockFile(raw + ".lock")
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	if _, err := os.Stat(raw); err == nil {
+		return raw, nil // downloaded by another process meanwhile
+	}
 	client := &http.Client{Timeout: 60 * time.Minute}
 	fmt.Fprintf(log, "Fetching checksums %s\n", spec.SumsURL)
 	want, err := fetchSum(ctx, client, spec)

@@ -46,9 +46,10 @@ type Daemon struct {
 	paths Paths
 	log   *log.Logger
 
-	net    *netstack.Stack
-	vfkit  *exec.Cmd
-	signer ssh.Signer
+	net       *netstack.Stack
+	vfkit     *exec.Cmd
+	vfkitDone chan struct{} // closed when vfkit has exited
+	signer    ssh.Signer
 
 	mu       sync.Mutex
 	state    string
@@ -207,8 +208,10 @@ func (d *Daemon) boot(ctx context.Context) error {
 		return fmt.Errorf("starting vfkit: %w", err)
 	}
 	d.vfkit = cmd
+	d.vfkitDone = make(chan struct{})
 	go func() {
 		err := cmd.Wait()
+		close(d.vfkitDone)
 		d.log.Printf("vfkit exited: %v", err)
 		d.shutdown()
 	}()
@@ -228,6 +231,11 @@ func (d *Daemon) boot(ctx context.Context) error {
 	close(d.ready)
 	return nil
 }
+
+// ReadyProbe prints the machine-id only once first-boot provisioning has
+// finished AND the VM has rebooted since (cloud-init reboots at the end of
+// the first boot to apply the machine-id).
+const ReadyProbe = `test -f /var/lib/hat-provisioned && ! grep -qx "$(cat /proc/sys/kernel/random/boot_id)" /var/lib/hat-firstboot-id 2>/dev/null && cat /etc/machine-id`
 
 // waitReady waits until SSH works, first-boot provisioning has finished
 // (machine-id applied after the reboot), then reconciles settings.
@@ -252,7 +260,7 @@ func (d *Daemon) waitReady(ctx context.Context) error {
 			last = err
 			continue
 		}
-		out, err := session.Output(ctx, c, "test -f /var/lib/hat-provisioned && cat /etc/machine-id")
+		out, err := session.Output(ctx, c, ReadyProbe)
 		if err != nil || strings.TrimSpace(out) != d.st.MachineID {
 			c.Close()
 			last = errors.New("first-boot provisioning still running")
@@ -362,6 +370,10 @@ func (d *Daemon) handleCtl(c net.Conn) {
 		enc.Encode(CtlResponse{V: ProtoVersion, OK: true, State: "stopping"})
 		go d.shutdown()
 	case "dial":
+		if st := d.status().State; st == "stopping" {
+			enc.Encode(CtlResponse{V: ProtoVersion, State: st, Error: "VM is stopping"})
+			return
+		}
 		select {
 		case <-d.ready:
 		case <-d.stopped:
@@ -418,7 +430,7 @@ func (d *Daemon) shutdown() {
 			d.state = "stopping"
 		}
 		d.mu.Unlock()
-		if d.vfkit != nil && d.vfkit.ProcessState == nil {
+		if d.vfkit != nil && !closed(d.vfkitDone) {
 			if d.net != nil && d.signer != nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				if c, err := d.sshClient(ctx); err == nil {
@@ -427,8 +439,8 @@ func (d *Daemon) shutdown() {
 				}
 				cancel()
 			}
-			waitExit(d.vfkit, 30*time.Second, syscall.SIGTERM)
-			waitExit(d.vfkit, 10*time.Second, syscall.SIGKILL)
+			waitExit(d.vfkit, d.vfkitDone, 30*time.Second, syscall.SIGTERM)
+			waitExit(d.vfkit, d.vfkitDone, 10*time.Second, syscall.SIGKILL)
 		}
 		if d.net != nil {
 			d.net.Close()
@@ -439,15 +451,22 @@ func (d *Daemon) shutdown() {
 	})
 }
 
-func waitExit(cmd *exec.Cmd, wait time.Duration, sig syscall.Signal) {
-	deadline := time.Now().Add(wait)
-	for time.Now().Before(deadline) {
-		if cmd.Process.Signal(syscall.Signal(0)) != nil {
-			return
-		}
-		time.Sleep(200 * time.Millisecond)
+// waitExit waits for done, then sends sig if the process is still running.
+func waitExit(cmd *exec.Cmd, done <-chan struct{}, wait time.Duration, sig syscall.Signal) {
+	select {
+	case <-done:
+	case <-time.After(wait):
+		cmd.Process.Signal(sig)
 	}
-	cmd.Process.Signal(sig)
+}
+
+func closed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
 }
 
 // killOrphan stops a vfkit left behind by a crashed daemon.

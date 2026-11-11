@@ -12,12 +12,12 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 
 	"hat/internal/bridge"
 	"hat/internal/config"
+	"hat/internal/netutil"
 	"hat/internal/seatbelt"
 	"hat/internal/secret"
 	"hat/internal/upstream"
@@ -142,12 +142,16 @@ func Run(p *config.Profile, o Options) (int, error) {
 		return 126, err
 	}
 	done := make(chan struct{})
+	ttyDelivers := netutil.TerminalDeliversSignals()
 	go func() {
 		for {
 			select {
 			case s := <-sigs:
-				if s == syscall.SIGINT || s == syscall.SIGQUIT || s == syscall.SIGWINCH {
-					continue // delivered by the terminal to the whole group
+				if s == syscall.SIGWINCH {
+					continue
+				}
+				if ttyDelivers && (s == syscall.SIGINT || s == syscall.SIGQUIT) {
+					continue // the terminal already delivered it to the child's group
 				}
 				cmd.Process.Signal(s)
 			case <-done:
@@ -196,7 +200,7 @@ func Env(base []string, p *config.Profile, bridgeAddr, user, pass, profileHome, 
 		k, _, _ := strings.Cut(kv, "=")
 		ku := strings.ToUpper(k)
 		if drop[ku] || strings.HasPrefix(ku, "LC_") || k == "LANG" || k == "TZ" ||
-			strings.HasPrefix(k, "HAT_") || k == "BROWSER" {
+			(strings.HasPrefix(k, "HAT_") && k != config.EnvHome) || k == "BROWSER" {
 			continue
 		}
 		if profileHome != "" && (k == "HOME" || strings.HasPrefix(k, "XDG_")) {
@@ -222,9 +226,10 @@ func Env(base []string, p *config.Profile, bridgeAddr, user, pass, profileHome, 
 	set("LANGUAGE", p.Lang()+":"+strings.SplitN(p.Lang(), "_", 2)[0])
 	set("TZ", p.Timezone)
 	set("BROWSER", filepath.Join(binDir, OpenURLHelper))
-	set("JAVA_TOOL_OPTIONS", strings.TrimSpace(getenv(base, "JAVA_TOOL_OPTIONS")+
-		" -Djava.net.preferIPv4Stack=true -Dhttp.proxyHost=127.0.0.1 -Dhttps.proxyHost=127.0.0.1"+
-		" -Dhttp.proxyPort="+portOf(bridgeAddr)+" -Dhttps.proxyPort="+portOf(bridgeAddr)))
+	// Java ignores *_PROXY variables and cannot send the bridge credentials
+	// without code changes; prefer IPv4 so loopback matches the sandbox rule.
+	// Java tools work best in vm mode.
+	set("JAVA_TOOL_OPTIONS", strings.TrimSpace(getenv(base, "JAVA_TOOL_OPTIONS")+" -Djava.net.preferIPv4Stack=true"))
 	set(config.EnvActive, p.Name)
 	for k, v := range p.Env {
 		set(k, v)
@@ -249,17 +254,6 @@ func getenv(env []string, key string) string {
 		}
 	}
 	return ""
-}
-
-func portOf(addr string) string {
-	i := strings.LastIndex(addr, ":")
-	if i < 0 {
-		return ""
-	}
-	if _, err := strconv.Atoi(addr[i+1:]); err != nil {
-		return ""
-	}
-	return addr[i+1:]
 }
 
 // realPath resolves symlinks (sandbox rules match real paths, e.g. /private/var).

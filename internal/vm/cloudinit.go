@@ -3,6 +3,8 @@ package vm
 import (
 	"fmt"
 	"strings"
+
+	"hat/internal/session"
 )
 
 // GuestUID matches the default macOS user id so files in virtio-fs shares
@@ -82,6 +84,9 @@ func UserData(in SeedInput) string {
 	for _, c := range in.Provision {
 		w("  - [sh, -c, %s]", yq(c))
 	}
+	// Remember this (first) boot so the daemon only reports ready after
+	// the reboot below has happened.
+	w("  - [sh, -c, %s]", yq("cat /proc/sys/kernel/random/boot_id > /var/lib/hat-firstboot-id"))
 	w("  - [touch, /var/lib/hat-provisioned]")
 	w("power_state:")
 	w("  mode: reboot")
@@ -94,26 +99,5 @@ func localeScript(locale string) string {
 	return fmt.Sprintf("L=%s; if ! locale -a 2>/dev/null | grep -qi \"^$(echo ${L%%.*}).utf-\\?8$\"; then "+
 		"(command -v locale-gen >/dev/null || (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y locales)) && "+
 		"sed -i \"s/^# *\\($L\\)/\\1/\" /etc/locale.gen && grep -q \"^$L\" /etc/locale.gen || echo \"$L UTF-8\" >> /etc/locale.gen; "+
-		"locale-gen; fi; update-locale LANG=$L; true", shellQuote(locale))
+		"locale-gen; fi; update-locale LANG=$L; true", session.Quote(locale))
 }
-
-// shellQuote single-quotes s for POSIX sh.
-func shellQuote(s string) string {
-	if s == "" {
-		return "''"
-	}
-	safe := true
-	for _, r := range s {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("@%+=:,./-_", r)) {
-			safe = false
-			break
-		}
-	}
-	if safe {
-		return s
-	}
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-// ShellQuote is exported for the session package.
-func ShellQuote(s string) string { return shellQuote(s) }

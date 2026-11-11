@@ -35,6 +35,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 	"gvisor.dev/gvisor/pkg/waiter"
 
+	"hat/internal/netutil"
 	"hat/internal/upstream"
 )
 
@@ -299,7 +300,7 @@ func (n *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		return
 	}
 	n.Stats.UpstreamOK.Add(1)
-	pipe(gonet.NewTCPConn(&wq, ep), up)
+	netutil.Pipe(gonet.NewTCPConn(&wq, ep), up)
 }
 
 func (n *Stack) handleUDP(r *udp.ForwarderRequest) bool {
@@ -363,23 +364,4 @@ func (n *Stack) serveDNSOverTCP(r *tcp.ForwarderRequest) {
 			return
 		}
 	}
-}
-
-func pipe(a, b net.Conn) {
-	var wg sync.WaitGroup
-	wg.Add(2)
-	cp := func(dst, src net.Conn) {
-		defer wg.Done()
-		io.Copy(dst, src)
-		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-			cw.CloseWrite()
-		} else {
-			dst.Close()
-		}
-	}
-	go cp(a, b)
-	go cp(b, a)
-	wg.Wait()
-	a.Close()
-	b.Close()
 }
