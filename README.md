@@ -1,53 +1,53 @@
 # hat
 
-> 给命令行程序“换一顶帽子”：每个 profile 有自己的出口 IP（只走代理、断了就断网）、语言、时区；vm 模式下还有独立的主机名、machine-id、MAC 地址和账号凭证。像指纹浏览器管理浏览器窗口一样，管理你的 CLI 环境。
+> Put a different hat on your command-line programs. Each profile gets its own exit IP (proxy only, with a kill switch), language and timezone; in `vm` mode it also gets its own hostname, machine-id, MAC address and credentials. Manage your CLI environments the way an anti-detect browser manages browser profiles.
 
-适用场景：在不同地区/语言环境下测试程序、把工作与个人的账号和网络彻底分开、隐私保护。
+Use cases: testing programs as if from another region or language, keeping work and personal accounts and networks fully separate, privacy.
 
 ```
-teil chat                 # 通过 shim，自动在 us-east profile 里运行
+teil chat                 # via a shim, runs inside the us-east profile
 hat run jp -- curl https://example.com
 hat shell us-east
 ```
 
-## 两种模式
+## Two modes
 
-| | `lite` | `vm`（默认） |
+| | `lite` | `vm` (default) |
 |---|---|---|
-| 原理 | macOS 沙箱（Seatbelt）+ 本地桥接代理 | 每个 profile 一台 Linux 轻量虚拟机（vfkit） |
-| 启动速度 | 立即 | 首次几分钟（安装系统），之后秒级 |
-| 出口 IP / DNS 不泄露 / 断网保护 | ✅ 内核沙箱强制 | ✅ 虚拟机只有一条通往代理的网络路径 |
-| 语言、时区 | ✅ | ✅ |
-| 主机名、machine-id、MAC | ❌（与本机相同） | ✅ 每个 profile 独立 |
-| 账号凭证 / Keychain | ❌ 共享（可选独立 HOME） | ✅ 完全独立 |
-| 运行的程序 | 你 Mac 上装的版本 | VM 里装的 Linux 版本 |
-| 用系统 TLS 的程序（Go/Swift 写的 CLI） | 需 `--allow-trustd`，或改用 vm | ✅ |
+| How | macOS sandbox (Seatbelt) + local bridge proxy | one lightweight Linux VM per profile (vfkit) |
+| Startup | instant | a few minutes the first time (installs the guest), seconds afterwards |
+| Exit IP / no DNS leaks / kill switch | ✅ enforced by the kernel sandbox | ✅ the VM's only network path leads to the proxy |
+| Language, timezone | ✅ | ✅ |
+| Hostname, machine-id, MAC | ❌ (same as the Mac) | ✅ per profile |
+| Credentials / Keychain | ❌ shared (optional separate HOME) | ✅ fully separate |
+| Program that runs | the one installed on your Mac | the Linux build installed in the VM |
+| CLIs using the system TLS stack (Go/Swift) | need `--allow-trustd`, or use vm | ✅ |
 
-## 安全保证（以及不保证什么）
+## Security guarantees (and what is not guaranteed)
 
-**保证**
-- 每个 profile **必须**配置代理。代理不可达时连接直接失败，**永远不会回落直连**。
-- 域名不在本地解析，原样交给代理（socks5h 语义）；本机 DNS（mDNSResponder）在沙箱里被禁止；VM 内所有 53 端口查询由 hat 本地应答（fake-ip）。
-- UDP（QUIC 等）、ICMP、IPv6 一律丢弃；访问本机/局域网/云元数据地址（169.254.169.254）被拒绝。
-- lite 沙箱里的程序读不到 `~/.hat`（其它 profile 的代理密码）、不能调用系统打开浏览器（`open` 会用真实网络）。
-- 代码层面：只有 `internal/upstream` 能发起网络连接，由测试 `internal/policy` 强制。
+**Guaranteed**
+- Every profile **must** have a proxy. If the proxy is unreachable, connections fail; hat **never falls back to a direct connection**.
+- Hostnames are not resolved locally; they are passed to the proxy as-is (socks5h semantics). The system resolver (mDNSResponder) is blocked inside the sandbox; inside the VM every query on port 53 is answered locally by hat (fake-ip).
+- UDP (QUIC etc.), ICMP and IPv6 are dropped; connections to the host, the LAN and cloud metadata addresses (169.254.169.254) are refused.
+- Programs in the lite sandbox cannot read `~/.hat` (other profiles' proxy passwords) and cannot ask the system to open a browser (`open` would use the real network).
+- In the code, only `internal/upstream` can open network connections; the `internal/policy` test enforces this.
 
-**不保证 / 已知限制**
-- Shim 是便利不是强制：用绝对路径运行程序、IDE 或 Dock 启动的程序不经过 shim。
-- VM 能被识别为虚拟机（DMI 显示 Apple Virtualization）。vfkit 每次启动会生成新的 GenericMachineIdentifier（只有 root 可读）。
-- vm 模式的共享目录只读（`--ro`）在虚拟机内实现，VM 内 root 可以绕过；只能共享目录，不能共享单个文件；修改共享目录需重启 VM（`hat stop <p>`）。
-- 如果上游代理在本机（如本地 Clash，需 `--allow-local-upstream`），断网保护取决于该代理自身不直连（请用全局模式、固定节点）。
-- `lite` + `--allow-trustd` 时，系统证书服务可能用真实 IP 查询证书吊销状态（OCSP/CRL）。
+**Not guaranteed / known limitations**
+- Shims are a convenience, not enforcement: programs started by absolute path, from an IDE or from the Dock bypass them.
+- The VM can be identified as a VM (DMI reports Apple Virtualization). vfkit generates a new GenericMachineIdentifier on every boot (readable by root only).
+- Read-only shares (`--ro`) in vm mode are enforced inside the VM, so root in the VM can bypass them. Only directories can be shared, not single files, and changing shares requires a VM restart (`hat stop <p>`).
+- If the upstream proxy runs on your machine (e.g. a local Clash, which needs `--allow-local-upstream`), the kill switch depends on that proxy never connecting directly itself (use global mode with a fixed node).
+- With `lite` + `--allow-trustd`, the system certificate service may check revocation (OCSP/CRL) from your real IP.
 
-## 安装
+## Install
 
-依赖：Apple Silicon Mac、macOS 13+；vm 模式需要 [vfkit](https://github.com/crc-org/vfkit) ≥ 0.6.1：
+Requirements: Apple Silicon Mac, macOS 13+. vm mode needs [vfkit](https://github.com/crc-org/vfkit) ≥ 0.6.1:
 
 ```bash
 brew install vfkit
 ```
 
-从源码构建（需要 Go 1.26+）：
+Build from source (Go 1.26+), or download `hat-darwin-arm64` from the latest CI run under the repository's Actions tab:
 
 ```bash
 make build-mac
@@ -57,91 +57,127 @@ make build-mac
 sudo install -m 755 dist/hat-darwin-arm64 /usr/local/bin/hat
 ```
 
-把 shim 目录放在 PATH 最前面（写进 `~/.zshrc`）：
+Put the shim directory first in your PATH (add this to `~/.zshrc`):
 
 ```bash
 export PATH="$HOME/.hat/bin:$PATH"
 ```
 
-## 快速开始
+## Quick start
 
 ```bash
 hat create us-east --proxy 'socks5://user:pass@203.0.113.10:1080' --tz America/New_York --share ~/code
 ```
 
 ```bash
-hat check us-east
+hat preflight us-east
 ```
 
-`check` 会验证：出口 IP 是代理的 IP、DNS/UDP 不泄露、私网不可达、断网保护生效，以及主机名/machine-id/MAC。
+`preflight` is the launch checklist (see below); it also runs automatically before every launch. For a thorough leak test run `hat check us-east`: from inside the profile it verifies that the exit IP is the proxy's, DNS and UDP do not leak, private networks are unreachable, the kill switch works, and the hostname / machine-id / MAC are the profile's.
 
-在 profile 里运行命令（vm 模式下当前目录必须在共享目录内）：
+Run a command in a profile (in vm mode the current directory must be shared):
 
 ```bash
 cd ~/code/project && hat run us-east -- curl -s https://ipinfo.io
 ```
 
-进入 profile 的 shell：
+Open a shell in a profile:
 
 ```bash
 hat shell us-east
 ```
 
-### 包装一个 CLI（例：teil）
+### Wrapping a CLI (example: teil)
 
-vm 模式下，先在 VM 里装 Linux 版的 teil（举例，按 teil 的安装方式来）：
+In vm mode, first install the Linux build of teil in the VM (example; use teil's own install method):
 
 ```bash
 hat run us-east --home -- bash -lc 'npm install -g teil'
 ```
 
-创建 shim，以后直接输入 `teil` 就会在 us-east 里运行：
+Create a shim; from then on typing `teil` runs it in us-east:
 
 ```bash
 hat shim add teil --profile us-east
 ```
 
-同一个工具绑定另一个 profile：
+Bind the same tool to another profile:
 
 ```bash
 hat shim add teil --as teil@jp
 ```
 
-临时切换 profile：
+Switch profiles for one invocation:
 
 ```bash
 HAT_PROFILE=jp teil chat
 ```
 
-## 命令一览
+## Launch checklist (preflight)
 
-| 命令 | 说明 |
+Before anything starts through `hat run`, `hat shell` or a shim, hat runs a round of checks. **If any check fails, nothing is started:**
+
+| Check | What it verifies | Level |
+|---|---|---|
+| config | profile is valid; its files are readable only by you | always |
+| platform | lite: sandbox-exec available; vm: platform supported | always |
+| proxy | the proxy is reachable and accepts the credentials (opens one tunnel through it) | quick |
+| egress | exit IP, country and timezone, looked up through the proxy | full |
+| expect_country / expect_ip | the exit must be in the expected country / be the expected IP (catches a proxy that silently moved) | full |
+| timezone | warns (only) if the exit IP's timezone differs from the profile's | full |
+
+- A passing result is cached for 10 minutes (`checks.cache_seconds`), so running many commands stays fast; failures are never cached.
+- The default level is `full`; set `quick` or `off` with `hat set <p> checks.on_start=quick`.
+- Pin the exit country: `hat set <p> checks.expect_country=US` (or `--expect-country US` at creation).
+- Run it by hand: `hat preflight <p> [--force] [--json]`.
+- The kill switch does not depend on the checklist: if the proxy dies after a passing preflight, connections still fail closed. The checklist exists to fail early with a clear error and to catch "the exit moved" problems.
+
+## For AI agents
+
+hat is designed to be agent-friendly (following [clig.dev](https://clig.dev/) and community conventions for agent CLIs) and ships [`skills/hat/SKILL.md`](skills/hat/SKILL.md), which agents such as Claude Code can use directly as a skill.
+
+- **Structured output:** every read command supports `--json` (or `HAT_JSON=1`) with the envelope `{"ok":true,"schema":1,"data":...}`; data goes to stdout, notices to stderr.
+- **Structured errors:** `{"ok":false,"error":{"code":"PROXY_UNREACHABLE","message":...,"hint":...,"retryable":true,"exit_code":4}}`.
+- **Exit codes:** 0 ok, 1 error, 2 usage / input required, 3 not found, 4 proxy unreachable / auth failed, 5 preflight failed, 6 VM failed, 7 already exists. `run`, `shell` and shims pass through the command's own exit code; when hat itself fails they return 125 (127 for command not found).
+- **Never blocks on a prompt:** without a TTY hat is non-interactive automatically (or pass `--no-input`). Change settings with `hat set <p> KEY=VALUE`, delete with `--yes`, and pass passwords with `--password-stdin` (never as an argument).
+- **Idempotent:** `hat create --exists-ok`; starting the same VM concurrently is safe.
+- **Signals:** SIGINT/SIGTERM sent to hat are forwarded to the running program.
+
+## Commands
+
+| Command | Description |
 |---|---|
-| `hat create <p> --proxy URL [--mode vm\|lite] [--tz] [--locale] [--hostname] [--share DIR]` | 创建 profile；URL 里的密码会被移出并单独保存（0600 文件，或 `--keychain`） |
-| `hat list` / `show <p>` / `edit <p>` / `rm <p>` | 管理 profile（`edit` 保存前会校验） |
-| `hat proxy-password <p> [--keychain\|--none]` | 修改代理密码 |
-| `hat share add\|rm\|list <p> [dir] [--ro]` | 共享目录 |
-| `hat run <p> [--home] -- cmd...` | 运行命令；退出码、信号、管道、终端尺寸原样透传 |
-| `hat shell <p>` | 交互式 shell |
-| `hat shim add <cmd> --profile <p> [--as name]` / `shim rm` / `shim list` | 命令替身 |
-| `hat start\|stop\|status <p>` | VM 生命周期（空闲 30 分钟自动关机） |
-| `hat check <p>` | 泄露与断网保护检测 |
-| `hat doctor` | 检查 PATH、vfkit、sandbox-exec |
-| `hat debug-bundle <p>` | 打包日志用于反馈（不含密码） |
+| `hat create <p> --proxy URL [--mode vm\|lite] [--tz] [--locale] [--hostname] [--share DIR] [--password-stdin] [--expect-country CC] [--exists-ok]` | create a profile; the password is stored separately (0600 file, or `--keychain`) |
+| `hat list` / `show <p>` / `rm <p> --yes` | manage profiles |
+| `hat set <p> KEY=VALUE...` | change settings non-interactively (`hat set --help` lists the keys) |
+| `hat edit <p>` | edit in $EDITOR (validated before saving) |
+| `hat proxy-password <p> [--password-stdin\|--keychain\|--none]` | change the proxy password |
+| `hat share add\|rm\|list <p> [dir] [--ro]` | shared directories |
+| `hat run <p> [--home] -- cmd...` | run a command; exit code, signals, pipes and terminal size pass through |
+| `hat shell <p>` | interactive shell |
+| `hat shim add <cmd> --profile <p> [--as name]` / `shim rm` / `shim list` | command shims |
+| `hat start\|stop\|status <p>` | VM lifecycle (stops automatically after 30 idle minutes) |
+| `hat preflight <p> [--force] [--level quick\|full]` | launch checklist |
+| `hat check <p>` | full leak and kill-switch test from inside the profile |
+| `hat doctor` | checks PATH, vfkit, sandbox-exec |
+| `hat debug-bundle <p>` | collects logs for a bug report (no passwords) |
 
-## 文件位置
+## Files
 
 ```
-~/.hat/profiles/<p>/profile.toml   配置（可编辑，0600，不含密码）
-~/.hat/profiles/<p>/state.json     生成的身份：machine-id、MAC（不要手改）
-~/.hat/profiles/<p>/secret         代理密码（password = "file" 时）
-~/.hat/profiles/<p>/disk.raw       VM 磁盘
-~/.hat/profiles/<p>/daemon.log     VM 守护进程日志；console.log 为 VM 控制台
-~/.hat/bin/                        shim
-~/.hat/images/                     基础系统镜像（Debian 13 arm64，下载一次）
+~/.hat/profiles/<p>/profile.toml   settings (editable, 0600, no password)
+~/.hat/profiles/<p>/state.json     generated identity: machine-id, MAC (do not edit)
+~/.hat/profiles/<p>/secret         proxy password (when password = "file")
+~/.hat/profiles/<p>/preflight.json last launch checklist result
+~/.hat/profiles/<p>/disk.raw       VM disk
+~/.hat/profiles/<p>/daemon.log     VM daemon log; console.log is the VM console
+~/.hat/bin/                        shims
+~/.hat/images/                     base guest image (Debian 13 arm64, downloaded once)
 ```
 
-## 开发
+## Development
+
+Conventions for contributors (and AI agents working in this repository) are in [`AGENTS.md`](AGENTS.md).
 
 ```bash
 make test
@@ -151,10 +187,10 @@ make test
 make e2e
 ```
 
-`make e2e` 在 Linux 上用一个假的 vfkit（gVisor 模拟的“虚拟机”）跑完整的 VM 生命周期：首次启动、命令执行、并发、停止、重启、守护进程崩溃恢复。真实 macOS 上的验证用：
+`make e2e` runs the complete VM lifecycle on Linux against a fake vfkit (a "VM" simulated with gVisor): first start, command execution, concurrency, stop, restart and recovery after a daemon crash. On a real Mac, verify with:
 
 ```bash
 scripts/macos-smoke.sh 'socks5://user:pass@host:port'
 ```
 
-设计与调研：`docs/PLAN.md`、`docs/research.md`。
+Design notes and research (in Chinese): `docs/PLAN.md`, `docs/research.md`.
