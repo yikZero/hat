@@ -128,3 +128,30 @@ func TestRunDirShort(t *testing.T) {
 		t.Fatalf("run dir too long: %s", d)
 	}
 }
+
+// Reported from the macOS retest: a long symlink alias of an outer share
+// must not outrank an inner share given by its real path.
+func TestGuestPathInnerShareThroughLongOuterAlias(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "r")
+	inner := filepath.Join(real, "sub")
+	if err := os.MkdirAll(inner, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "a-much-longer-logical-alias-for-the-outer-share")
+	if err := os.Symlink(real, alias); err != nil {
+		t.Fatal(err)
+	}
+	p := New("probe")
+	p.Share = []Share{{Path: alias}, {Path: inner, ReadOnly: true}}
+	for _, cwd := range []string{filepath.Join(alias, "sub"), inner} {
+		guest, chosen, ok := p.GuestPath(cwd)
+		if !ok || !chosen.ReadOnly || guest != inner {
+			t.Fatalf("cwd %s: inner share not selected: guest=%q share=%+v ok=%v", cwd, guest, chosen, ok)
+		}
+	}
+	// The outer share still applies outside the inner one.
+	if guest, chosen, ok := p.GuestPath(alias); !ok || chosen.ReadOnly || guest != alias {
+		t.Fatalf("outer: guest=%q share=%+v ok=%v", guest, chosen, ok)
+	}
+}

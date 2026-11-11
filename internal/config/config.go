@@ -356,34 +356,36 @@ func (p *Profile) ExpandedShares() ([]Share, error) {
 	return out, nil
 }
 
-// GuestPath maps a host directory to its path inside the VM. Shares are
-// mounted in the guest at their configured path, so the result is always
-// expressed under that path even when the host path reaches the share
-// through a symlink alias (on macOS /tmp is /private/tmp, /var is
-// /private/var). The innermost matching share wins.
+// GuestPath maps a host directory to its path inside the VM. Matching and
+// priority use real paths only (symlinks resolved), so an alias spelling —
+// on macOS /tmp is /private/tmp — never changes which share is chosen; the
+// innermost share containing the directory wins. The result is expressed
+// under the chosen share's configured path, which is where the guest
+// mounts it.
 func (p *Profile) GuestPath(hostPath string) (guest string, share Share, ok bool) {
 	shares, err := p.ExpandedShares()
 	if err != nil {
 		return "", Share{}, false
 	}
-	hostPath = filepath.Clean(hostPath)
-	hostReal := realPath(hostPath)
+	target := realPath(filepath.Clean(hostPath))
 	best := -1
 	for _, s := range shares {
-		for _, cand := range [][2]string{{s.Path, hostPath}, {realPath(s.Path), hostReal}} {
-			base, target := cand[0], cand[1]
-			if target != base && !strings.HasPrefix(target, base+string(filepath.Separator)) {
-				continue
-			}
-			if len(base) <= best {
-				continue
-			}
-			rel, err := filepath.Rel(base, target)
-			if err != nil {
-				continue
-			}
-			best, guest, share, ok = len(base), filepath.Join(s.Path, rel), s, true
+		base := realPath(s.Path)
+		if target != base && !strings.HasPrefix(target, base+string(filepath.Separator)) {
+			continue
 		}
+		depth := strings.Count(base, string(filepath.Separator))
+		if base == string(filepath.Separator) {
+			depth = 0
+		}
+		if depth <= best {
+			continue
+		}
+		rel, err := filepath.Rel(base, target)
+		if err != nil {
+			continue
+		}
+		best, guest, share, ok = depth, filepath.Join(s.Path, rel), s, true
 	}
 	return guest, share, ok
 }
