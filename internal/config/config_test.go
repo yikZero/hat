@@ -69,14 +69,42 @@ func TestValidate(t *testing.T) {
 	}
 }
 
-func TestSharedPath(t *testing.T) {
+func TestGuestPath(t *testing.T) {
 	p := New("x")
 	p.Share = []Share{{Path: "/Users/a/code"}}
-	for path, want := range map[string]bool{"/Users/a/code": true, "/Users/a/code/p/q": true,
-		"/Users/a/codex": false, "/Users/a": false} {
-		if _, ok := p.SharedPath(path); ok != want {
-			t.Errorf("%s: got %v", path, ok)
+	for path, want := range map[string]string{"/Users/a/code": "/Users/a/code", "/Users/a/code/p/q": "/Users/a/code/p/q",
+		"/Users/a/codex": "", "/Users/a": ""} {
+		if got, _, ok := p.GuestPath(path); got != want || ok != (want != "") {
+			t.Errorf("%s: got %q %v", path, got, ok)
 		}
+	}
+}
+
+// macOS: /tmp -> /private/tmp. The same directory must match whichever
+// spelling the share and the cwd use, and map to the share's spelling.
+func TestGuestPathThroughSymlinkAlias(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "private", "tmp")
+	os.MkdirAll(filepath.Join(real, "proj", "sub"), 0o755)
+	alias := filepath.Join(root, "tmp")
+	if err := os.Symlink(real, alias); err != nil {
+		t.Skip(err)
+	}
+	p := New("x")
+	p.Share = []Share{{Path: filepath.Join(alias, "proj")}}
+	got, _, ok := p.GuestPath(filepath.Join(real, "proj", "sub"))
+	if !ok || got != filepath.Join(alias, "proj", "sub") {
+		t.Fatalf("real cwd under aliased share: %q %v", got, ok)
+	}
+	p.Share = []Share{{Path: filepath.Join(real, "proj")}}
+	got, _, ok = p.GuestPath(filepath.Join(alias, "proj"))
+	if !ok || got != filepath.Join(real, "proj") {
+		t.Fatalf("aliased cwd under real share: %q %v", got, ok)
+	}
+	// innermost share wins
+	p.Share = []Share{{Path: filepath.Join(real, "proj")}, {Path: filepath.Join(alias, "proj", "sub"), ReadOnly: true}}
+	if _, s, _ := p.GuestPath(filepath.Join(real, "proj", "sub")); !s.ReadOnly {
+		t.Fatal("outer share chosen over inner one")
 	}
 }
 

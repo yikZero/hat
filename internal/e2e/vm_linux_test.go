@@ -177,3 +177,36 @@ func (h *harness) daemonLog() string {
 	b, _ := os.ReadFile(filepath.Join(h.home, "profiles", "e2e", "daemon.log"))
 	return string(b)
 }
+
+// A share configured through a symlink alias (macOS: /tmp -> /private/tmp)
+// must match a cwd given as the real path, and the command must run in the
+// guest under the share's configured path.
+func TestVMSharedThroughSymlinkAlias(t *testing.T) {
+	h := setup(t)
+	root := filepath.Dir(h.share)
+	real := filepath.Join(root, "private-proj")
+	os.MkdirAll(filepath.Join(real, "sub"), 0o755)
+	alias := filepath.Join(root, "proj-alias")
+	if err := os.Symlink(real, alias); err != nil {
+		t.Skip(err)
+	}
+	if _, e, c := h.run("", "share", "add", "e2e", alias); c != 0 {
+		t.Fatalf("share add: %s", e)
+	}
+	cmd := exec.Command(h.hat, "run", "e2e", "--", "sh", "-c", `echo "$PWD"`) // logical path, as the guest cd set it
+	var env []string
+	for _, kv := range h.env {
+		if !strings.HasPrefix(kv, "PWD=") {
+			env = append(env, kv)
+		}
+	}
+	cmd.Env = env
+	cmd.Dir = filepath.Join(real, "sub")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run from real path: %v %s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != filepath.Join(alias, "sub") {
+		t.Fatalf("guest cwd %q, want %q", got, filepath.Join(alias, "sub"))
+	}
+}

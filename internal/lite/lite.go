@@ -256,18 +256,7 @@ func getenv(env []string, key string) string {
 	return ""
 }
 
-// realPath resolves symlinks (sandbox rules match real paths, e.g. /private/var).
-func realPath(p string) string {
-	if r, err := filepath.EvalSymlinks(p); err == nil {
-		return r
-	}
-	// Resolve the deepest existing parent.
-	dir, base := filepath.Split(filepath.Clean(p))
-	if dir == "" || dir == p {
-		return p
-	}
-	return filepath.Join(realPath(filepath.Clean(dir)), base)
-}
+func realPath(p string) string { return config.RealPath(p) }
 
 func realPathOrEmpty(p string) string {
 	if p == "" {

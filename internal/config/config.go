@@ -356,20 +356,54 @@ func (p *Profile) ExpandedShares() ([]Share, error) {
 	return out, nil
 }
 
-// SharedPath reports whether path is inside one of the shares.
-func (p *Profile) SharedPath(path string) (Share, bool) {
+// GuestPath maps a host directory to its path inside the VM. Shares are
+// mounted in the guest at their configured path, so the result is always
+// expressed under that path even when the host path reaches the share
+// through a symlink alias (on macOS /tmp is /private/tmp, /var is
+// /private/var). The innermost matching share wins.
+func (p *Profile) GuestPath(hostPath string) (guest string, share Share, ok bool) {
 	shares, err := p.ExpandedShares()
 	if err != nil {
-		return Share{}, false
+		return "", Share{}, false
 	}
-	path = filepath.Clean(path)
+	hostPath = filepath.Clean(hostPath)
+	hostReal := realPath(hostPath)
+	best := -1
 	for _, s := range shares {
-		if path == s.Path || strings.HasPrefix(path, s.Path+string(filepath.Separator)) {
-			return s, true
+		for _, cand := range [][2]string{{s.Path, hostPath}, {realPath(s.Path), hostReal}} {
+			base, target := cand[0], cand[1]
+			if target != base && !strings.HasPrefix(target, base+string(filepath.Separator)) {
+				continue
+			}
+			if len(base) <= best {
+				continue
+			}
+			rel, err := filepath.Rel(base, target)
+			if err != nil {
+				continue
+			}
+			best, guest, share, ok = len(base), filepath.Join(s.Path, rel), s, true
 		}
 	}
-	return Share{}, false
+	return guest, share, ok
 }
+
+// realPath resolves symlinks; if the path does not exist it resolves the
+// deepest existing parent.
+func realPath(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	dir, base := filepath.Split(filepath.Clean(p))
+	dir = filepath.Clean(dir)
+	if dir == p || dir == "." || dir == "/" {
+		return p
+	}
+	return filepath.Join(realPath(dir), base)
+}
+
+// RealPath is realPath for other packages.
+func RealPath(p string) string { return realPath(p) }
 
 // Load reads and validates a profile by name.
 func Load(name string) (*Profile, error) {

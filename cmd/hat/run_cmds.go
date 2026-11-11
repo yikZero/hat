@@ -108,8 +108,16 @@ func runVM(p *config.Profile, argv []string, o runOpts) (int, error) {
 		if err != nil {
 			return 1, err
 		}
-		if _, ok := p.SharedPath(cwd); ok {
-			dir = cwd
+		// Prefer the shell's logical path when it is the same directory.
+		if pwd := os.Getenv("PWD"); pwd != "" && pwd != cwd {
+			if a, err1 := os.Stat(pwd); err1 == nil {
+				if b, err2 := os.Stat(cwd); err2 == nil && os.SameFile(a, b) {
+					cwd = pwd
+				}
+			}
+		}
+		if guest, _, ok := p.GuestPath(cwd); ok {
+			dir = guest
 		} else if !o.shell {
 			return 125, clierr.New(clierr.NotShared,
 				fmt.Sprintf("%s share add %s %s   (or run in the VM home: %s run %s --home -- ...)",

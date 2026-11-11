@@ -190,7 +190,8 @@ func (d *Daemon) boot(ctx context.Context) error {
 		if _, err := os.Stat(s.Path); err != nil {
 			return fmt.Errorf("shared directory %s: %w", s.Path, err)
 		}
-		vshares = append(vshares, VfkitShare{Tag: "hat" + strconv.Itoa(i), Path: s.Path})
+		// vfkit gets the resolved host path; the guest mounts it at s.Path.
+		vshares = append(vshares, VfkitShare{Tag: "hat" + strconv.Itoa(i), Path: config.RealPath(s.Path)})
 	}
 	args, err := VfkitArgs(VfkitOptions{
 		CPUs: d.p.VM.CPUs, MemoryMB: d.p.VM.MemoryMB, EFIVars: d.paths.EFIVars, Disk: d.paths.Disk,
