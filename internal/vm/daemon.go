@@ -483,7 +483,9 @@ func killOrphan(pidFile string) {
 	if out, err := exec.Command("ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output(); err == nil &&
 		strings.Contains(string(out), "vfkit") {
 		syscall.Kill(pid, syscall.SIGTERM)
-		time.Sleep(3 * time.Second)
+		for i := 0; i < 50 && syscall.Kill(pid, 0) == nil; i++ { // up to 10s
+			time.Sleep(200 * time.Millisecond)
+		}
 		syscall.Kill(pid, syscall.SIGKILL)
 	}
 	os.Remove(pidFile)

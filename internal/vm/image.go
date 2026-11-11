@@ -123,34 +123,97 @@ func fetchSum(ctx context.Context, c *http.Client, spec ImageSpec) (string, erro
 	return "", fmt.Errorf("checksum for %s not found", spec.File)
 }
 
+// downloadAttempts bounds retries of an interrupted download.
+var downloadAttempts = 5
+
+// download fetches url into dst, resuming with HTTP Range requests after an
+// interruption, then verifies the SHA-512 of the complete file.
 func download(ctx context.Context, c *http.Client, url, dst, wantSHA512 string, log io.Writer) error {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	resp, err := c.Do(req)
+	var err error
+	for attempt := 1; attempt <= downloadAttempts; attempt++ {
+		if err = downloadOnce(ctx, c, url, dst, log); err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			return err
+		}
+		if attempt < downloadAttempts {
+			wait := time.Duration(1<<attempt) * time.Second
+			fmt.Fprintf(log, "\n  download interrupted (%v); resuming in %s (attempt %d/%d)\n", err, wait, attempt+1, downloadAttempts)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(wait):
+			}
+		}
+	}
 	if err != nil {
-		return err
+		return fmt.Errorf("downloading %s: %w (partial file kept at %s; rerun to resume)", url, err, dst)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("%s: %s", url, resp.Status)
-	}
-	f, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	f, err := os.Open(dst)
 	if err != nil {
 		return err
 	}
 	h := sha512.New()
-	pr := &progress{w: log, total: resp.ContentLength}
-	_, err = io.Copy(io.MultiWriter(f, h, pr), resp.Body)
-	pr.done()
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
+	_, err = io.Copy(h, f)
+	f.Close()
 	if err != nil {
-		os.Remove(dst)
 		return err
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != wantSHA512 {
 		os.Remove(dst)
 		return fmt.Errorf("checksum mismatch for %s (got %s…, want %s…)", url, got[:16], wantSHA512[:16])
+	}
+	return nil
+}
+
+// downloadOnce continues dst from its current size.
+func downloadOnce(ctx context.Context, c *http.Client, url, dst string, log io.Writer) error {
+	f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	have, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return err
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if have > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", have))
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	total := resp.ContentLength
+	switch {
+	case resp.StatusCode == http.StatusPartialContent && have > 0:
+		if total >= 0 {
+			total += have
+		}
+	case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable && have > 0:
+		return nil // already complete; the checksum decides
+	case resp.StatusCode == http.StatusOK:
+		if err := f.Truncate(0); err != nil { // server ignored Range: start over
+			return err
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		have = 0
+	default:
+		return fmt.Errorf("%s: %s", url, resp.Status)
+	}
+	pr := &progress{w: log, total: total, n: have}
+	n, err := io.Copy(io.MultiWriter(f, pr), resp.Body)
+	pr.done()
+	if err != nil {
+		return err
+	}
+	if total >= 0 && have+n != total {
+		return fmt.Errorf("short download: %d of %d bytes", have+n, total)
 	}
 	return nil
 }

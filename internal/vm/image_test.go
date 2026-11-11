@@ -3,11 +3,21 @@ package vm
 import (
 	"archive/tar"
 	"bytes"
+	"context"
+	"crypto/sha512"
+	"encoding/hex"
+	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ulikunitz/xz"
 
@@ -112,5 +122,63 @@ func TestImportGNUSparse(t *testing.T) {
 	// The output stays sparse (allocated blocks far below the logical size).
 	if blocks := allocatedBytes(st); blocks > 16<<20 {
 		t.Fatalf("output not sparse: %d bytes allocated", blocks)
+	}
+}
+
+// Reported from the macOS retest: the first image download died with
+// "unexpected EOF" around 64 MiB. Downloads now resume with Range requests.
+func TestDownloadResumesAfterInterruption(t *testing.T) {
+	payload := make([]byte, 3<<20)
+	for i := range payload {
+		payload[i] = byte(i * 7)
+	}
+	sum := sha512.Sum512(payload)
+	want := hex.EncodeToString(sum[:])
+	var cuts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if cuts.Load() < 2 {
+			// Send part of the remaining body, then drop the connection.
+			cuts.Add(1)
+			start := 0
+			if rg := r.Header.Get("Range"); rg != "" {
+				fmt.Sscanf(rg, "bytes=%d-", &start)
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, len(payload)-1, len(payload)))
+				w.Header().Set("Content-Length", strconv.Itoa(len(payload)-start))
+				w.WriteHeader(http.StatusPartialContent)
+			} else {
+				w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+			}
+			w.Write(payload[start : start+(1<<20)])
+			w.(http.Flusher).Flush()
+			conn, _, _ := w.(http.Hijacker).Hijack()
+			conn.Close()
+			return
+		}
+		http.ServeContent(w, r, "img", time.Time{}, bytes.NewReader(payload))
+	}))
+	defer srv.Close()
+	old := downloadAttempts
+	downloadAttempts = 4
+	defer func() { downloadAttempts = old }()
+	dst := filepath.Join(t.TempDir(), "img.part")
+	start := time.Now()
+	if err := download(context.Background(), srv.Client(), srv.URL, dst, want, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(dst)
+	if !bytes.Equal(got, payload) {
+		t.Fatal("resumed download differs")
+	}
+	if time.Since(start) > 20*time.Second {
+		t.Fatal("too slow")
+	}
+	// A corrupt result is rejected and removed.
+	os.WriteFile(dst, []byte("garbage"), 0o600)
+	cuts.Store(10)
+	if err := download(context.Background(), srv.Client(), srv.URL, dst, strings.Repeat("0", 128), io.Discard); err == nil {
+		t.Fatal("checksum mismatch accepted")
+	}
+	if _, err := os.Stat(dst); err == nil {
+		t.Fatal("bad download not removed")
 	}
 }
