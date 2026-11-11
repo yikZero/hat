@@ -149,3 +149,41 @@ func TestQuote(t *testing.T) {
 		}
 	}
 }
+
+// Reported from the macOS retest: x/crypto/ssh copies stdout and stderr in
+// two goroutines, so passing the same buffer for both raced and could lose
+// output. Run under -race (make test / CI).
+func TestSharedWriterForStdoutAndStderr(t *testing.T) {
+	_, ck, _ := ed25519.GenerateKey(rand.Reader)
+	signer, _ := ssh.NewSignerFromKey(ck)
+	ln := testServer(t, signer.PublicKey())
+	defer ln.Close()
+	conn, _ := net.Dial("tcp", ln.Addr().String())
+	c, err := Connect(conn, "dev", signer, filepath.Join(t.TempDir(), "kh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	script := `i=0; while [ $i -lt 200 ]; do echo out$i; echo err$i >&2; i=$((i+1)); done`
+	for round := 0; round < 5; round++ {
+		var buf bytes.Buffer
+		code, err := Run(context.Background(), c, Request{Argv: []string{"sh", "-c", script},
+			Stdin: strings.NewReader(""), Stdout: &buf, Stderr: &buf, NoTTY: true})
+		if err != nil || code != 0 {
+			t.Fatal(code, err)
+		}
+		for _, want := range []string{"out0\n", "out199\n", "err0\n", "err199\n"} {
+			if !strings.Contains(buf.String(), want) {
+				t.Fatalf("round %d: lost %q (got %d bytes)", round, want, buf.Len())
+			}
+		}
+		out, err := Output(context.Background(), c, script)
+		if err != nil || !strings.Contains(out, "out199\n") || strings.Contains(out, "err") {
+			t.Fatalf("Output: stdout only expected, got err=%v len=%d", err, len(out))
+		}
+	}
+	_, err = Output(context.Background(), c, "echo visible-error >&2; exit 3")
+	if err == nil || !strings.Contains(err.Error(), "visible-error") {
+		t.Fatalf("stderr must be reported in the error: %v", err)
+	}
+}

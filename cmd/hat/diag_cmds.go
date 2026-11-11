@@ -171,11 +171,14 @@ func checkLite(p *config.Profile, c *checker) error {
 	return nil
 }
 
+// vmOut runs script in the guest and returns its stdout and exit code.
+// Stdout and stderr are captured separately so probe results are never
+// mixed with (or lost to) diagnostics on stderr.
 func vmOut(ctx context.Context, cl *ssh.Client, script string) (string, int) {
-	var out bytes.Buffer
+	var out, errb bytes.Buffer
 	// bash, not sh: Debian's sh is dash, which lacks /dev/udp and /dev/tcp.
 	code, err := session.Run(ctx, cl, session.Request{Argv: []string{"bash", "-c", script}, NoTTY: true,
-		Stdin: strings.NewReader(""), Stdout: &out, Stderr: &out})
+		Stdin: strings.NewReader(""), Stdout: &out, Stderr: &errb})
 	if err != nil {
 		return err.Error(), 255
 	}

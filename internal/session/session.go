@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -141,6 +142,12 @@ func Run(ctx context.Context, c *ssh.Client, r Request) (int, error) {
 	if r.Stderr == nil {
 		r.Stderr = os.Stderr
 	}
+	// x/crypto/ssh copies stdout and stderr in separate goroutines; if both
+	// go to the same writer, serialize the writes (as os/exec does).
+	if sameWriter(r.Stdout, r.Stderr) {
+		w := &lockedWriter{w: r.Stdout}
+		r.Stdout, r.Stderr = w, w
+	}
 	inF, inIsFile := r.Stdin.(*os.File)
 	outF, outIsFile := r.Stdout.(*os.File)
 	tty := r.ForceTTY || (!r.NoTTY && inIsFile && outIsFile && term.IsTerminal(int(inF.Fd())) && term.IsTerminal(int(outF.Fd())))
@@ -231,21 +238,48 @@ func exitCode(err error) (int, error) {
 	return 255, err
 }
 
-// Output runs a command (no TTY) and returns its combined output.
+// Output runs a command (no TTY) and returns its stdout. Stderr is captured
+// separately and included in the error if the command fails.
 func Output(ctx context.Context, c *ssh.Client, script string) (string, error) {
 	s, err := c.NewSession()
 	if err != nil {
 		return "", err
 	}
 	defer s.Close()
-	var buf bytes.Buffer
-	s.Stdout, s.Stderr = &buf, &buf
+	var stdout, stderr bytes.Buffer
+	s.Stdout, s.Stderr = &stdout, &stderr
 	errc := make(chan error, 1)
 	go func() { errc <- s.Run(script) }()
 	select {
 	case err := <-errc:
-		return buf.String(), err
+		if err != nil && stderr.Len() > 0 {
+			err = fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+		}
+		return stdout.String(), err
 	case <-ctx.Done():
-		return buf.String(), ctx.Err()
+		s.Signal(ssh.SIGTERM)
+		return stdout.String(), ctx.Err()
 	}
+}
+
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
+// sameWriter reports whether a and b are the same writer (false for
+// writers whose dynamic type is not comparable).
+func sameWriter(a, b io.Writer) (same bool) {
+	defer func() {
+		if recover() != nil {
+			same = false
+		}
+	}()
+	return a == b
 }
