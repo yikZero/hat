@@ -77,6 +77,10 @@ type Stack struct {
 	subnet  netip.Prefix
 	Stats   Stats
 
+	// blackhole makes every new connection fail as if the upstream were
+	// down (used by `hat check` to verify the kill switch end to end).
+	blackhole atomic.Bool
+
 	mu       sync.Mutex
 	lastErr  error
 	closed   chan struct{}
@@ -214,6 +218,9 @@ func (n *Stack) DialGuest(ctx context.Context, port int) (net.Conn, error) {
 	}, ipv4.ProtocolNumber)
 }
 
+// SetBlackhole enables or disables the kill-switch test mode.
+func (n *Stack) SetBlackhole(on bool) { n.blackhole.Store(on) }
+
 // GuestIP returns the guest's address.
 func (n *Stack) GuestIP() string { return n.guest.String() }
 
@@ -266,9 +273,15 @@ func (n *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		r.Complete(true) // RST
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), n.cfg.DialTimeout)
-	up, err := n.cfg.Dialer.DialContext(ctx, "tcp", target)
-	cancel()
+	var up net.Conn
+	var err error
+	if n.blackhole.Load() {
+		err = errors.New("kill-switch test: upstream treated as unreachable")
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), n.cfg.DialTimeout)
+		up, err = n.cfg.Dialer.DialContext(ctx, "tcp", target)
+		cancel()
+	}
 	if err != nil {
 		n.Stats.UpstreamFailed.Add(1)
 		n.mu.Lock()

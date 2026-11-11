@@ -262,3 +262,21 @@ func TestDialGuest(t *testing.T) {
 		t.Fatalf("got %q", line)
 	}
 }
+
+func TestBlackhole(t *testing.T) {
+	e := newEnv(t)
+	e.host.SetBlackhole(true)
+	if c, err := e.dialTCP("203.0.113.5", e.port); err == nil {
+		c.Close()
+		t.Fatal("connected in blackhole mode")
+	}
+	if len(e.proxy.Targets()) != 0 {
+		t.Fatal("blackhole reached upstream")
+	}
+	e.host.SetBlackhole(false)
+	c, err := e.dialTCP("203.0.113.5", e.port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip(t, c)
+}
