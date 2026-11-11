@@ -173,7 +173,8 @@ func checkLite(p *config.Profile, c *checker) error {
 
 func vmOut(ctx context.Context, cl *ssh.Client, script string) (string, int) {
 	var out bytes.Buffer
-	code, err := session.Run(ctx, cl, session.Request{Argv: []string{"sh", "-c", script}, NoTTY: true,
+	// bash, not sh: Debian's sh is dash, which lacks /dev/udp and /dev/tcp.
+	code, err := session.Run(ctx, cl, session.Request{Argv: []string{"bash", "-c", script}, NoTTY: true,
 		Stdin: strings.NewReader(""), Stdout: &out, Stderr: &out})
 	if err != nil {
 		return err.Error(), 255
