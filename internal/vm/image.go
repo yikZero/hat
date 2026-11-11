@@ -83,15 +83,23 @@ func EnsureImage(ctx context.Context, name string, log io.Writer) (string, error
 	if err != nil {
 		return "", err
 	}
-	archive := raw + ".tar.xz.part"
-	fmt.Fprintf(log, "Downloading %s (about 200 MB, once)\n", spec.URL)
-	if err := download(ctx, client, spec.URL, archive, want, log); err != nil {
-		return "", err
+	// A verified archive is kept until extraction succeeds, so a failed
+	// extraction does not cause another download.
+	archive := raw + ".tar.xz"
+	if _, err := os.Stat(archive); err != nil {
+		part := archive + ".part"
+		fmt.Fprintf(log, "Downloading %s (about 200 MB, once)\n", spec.URL)
+		if err := download(ctx, client, spec.URL, part, want, log); err != nil {
+			return "", err
+		}
+		if err := os.Rename(part, archive); err != nil {
+			return "", err
+		}
 	}
-	defer os.Remove(archive)
 	if err := ImportImage(name, archive, log); err != nil {
-		return "", err
+		return "", fmt.Errorf("%w (the verified download is kept at %s)", err, archive)
 	}
+	os.Remove(archive)
 	return raw, nil
 }
 
@@ -175,7 +183,7 @@ func ImportImage(name, archive string, log io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if filepath.Base(hdr.Name) != "disk.raw" || hdr.Typeflag != tar.TypeReg {
+		if filepath.Base(hdr.Name) != "disk.raw" || !isRegular(hdr.Typeflag) {
 			continue
 		}
 		tmp := raw + ".part"
@@ -185,6 +193,13 @@ func ImportImage(name, archive string, log io.Writer) error {
 		}
 		return os.Rename(tmp, raw)
 	}
+}
+
+// isRegular accepts regular files, including GNU sparse entries: Debian's
+// archive stores disk.raw as type 'S', and archive/tar expands the holes
+// transparently (writeSparse then keeps them as holes on disk).
+func isRegular(t byte) bool {
+	return t == tar.TypeReg || t == tar.TypeRegA || t == tar.TypeGNUSparse
 }
 
 // writeSparse copies r into a new file, seeking over all-zero blocks.
