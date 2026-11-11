@@ -1,0 +1,9 @@
+hat
+Copyright 2026 the hat authors
+
+This product includes software adapted from:
+
+- anthropic-experimental/sandbox-runtime (Apache License 2.0)
+  macOS Seatbelt base rules in internal/seatbelt/base.sb
+- containers/gvisor-tap-vsock (Apache License 2.0)
+  used as a library in internal/netstack
