@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"hat/internal/clierr"
 )
 
 // Dialer opens TCP connections to host:port through the upstream proxy.
@@ -88,7 +90,8 @@ func (b *base) dialServer(ctx context.Context) (net.Conn, error) {
 	d := net.Dialer{Timeout: b.timeout, KeepAlive: 30 * time.Second}
 	c, err := d.DialContext(ctx, "tcp", b.server)
 	if err != nil {
-		return nil, fmt.Errorf("upstream proxy %s unreachable: %w", b.server, err)
+		return nil, &clierr.Error{Code: clierr.ProxyUnreachable, Err: fmt.Errorf("upstream proxy %s unreachable: %w", b.server, err),
+			Hint: "check that the proxy is running and reachable from this machine; no direct connection was attempted"}
 	}
 	return c, nil
 }
@@ -172,10 +175,10 @@ func (d *socks5Dialer) handshake(c net.Conn, host string, port int) error {
 			return fmt.Errorf("socks5 auth: %w", err)
 		}
 		if resp[1] != 0x00 {
-			return errors.New("socks5: authentication rejected by proxy")
+			return clierr.New(clierr.ProxyAuth, "update it with: hat proxy-password <profile>", "socks5: proxy rejected the username/password")
 		}
 	case 0xff:
-		return errors.New("socks5: proxy rejected all auth methods (check username/password)")
+		return clierr.New(clierr.ProxyAuth, "the proxy requires credentials; set them with: hat proxy-password <profile>", "socks5: proxy rejected all auth methods")
 	default:
 		return fmt.Errorf("socks5: unexpected auth method 0x%02x", resp[1])
 	}
@@ -282,6 +285,11 @@ func (d *httpDialer) DialContext(ctx context.Context, network, address string) (
 		done()
 		c.Close()
 		return nil, fmt.Errorf("http proxy: %w", err)
+	}
+	if resp.StatusCode == http.StatusProxyAuthRequired {
+		done()
+		c.Close()
+		return nil, clierr.New(clierr.ProxyAuth, "update it with: hat proxy-password <profile>", "http proxy: credentials rejected (%s)", resp.Status)
 	}
 	if resp.StatusCode != http.StatusOK {
 		done()

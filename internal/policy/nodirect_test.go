@@ -14,9 +14,10 @@ var forbidden = regexp.MustCompile(`\bnet\.(Dial|DialTimeout|DialTCP|DialUDP|Dia
 
 // allowed lists files that may contain such calls, with the reason.
 var allowed = map[string]string{
-	"internal/upstream/upstream.go": "the only dialer: connects to the configured proxy server itself",
-	"internal/vm/image.go":          "downloads the public guest OS image (host infrastructure, not profile traffic)",
-	"internal/vm/client.go":         "unix socket to the local daemon",
+	"internal/upstream/upstream.go":   "the only dialer: connects to the configured proxy server itself",
+	"internal/vm/image.go":            "downloads the public guest OS image (host infrastructure, not profile traffic)",
+	"internal/vm/client.go":           "unix socket to the local daemon",
+	"internal/preflight/preflight.go": "HTTP client whose DialContext is the upstream proxy dialer",
 }
 
 func TestNoDirectNetworkAccess(t *testing.T) {

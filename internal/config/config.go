@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"hat/internal/clierr"
 	"hat/internal/upstream"
 )
 
@@ -63,11 +65,48 @@ type Profile struct {
 	Locale   string `toml:"locale"`
 	Timezone string `toml:"timezone"`
 
-	Proxy ProxyConfig       `toml:"proxy"`
-	Env   map[string]string `toml:"env,omitempty"`
-	Share []Share           `toml:"share,omitempty"`
-	Lite  LiteConfig        `toml:"lite"`
-	VM    VMConfig          `toml:"vm"`
+	Proxy  ProxyConfig       `toml:"proxy"`
+	Env    map[string]string `toml:"env,omitempty"`
+	Share  []Share           `toml:"share,omitempty"`
+	Lite   LiteConfig        `toml:"lite"`
+	VM     VMConfig          `toml:"vm"`
+	Checks ChecksConfig      `toml:"checks"`
+}
+
+// Check levels for ChecksConfig.OnStart.
+const (
+	CheckOff   = "off"
+	CheckQuick = "quick" // proxy reachable + credentials accepted
+	CheckFull  = "full"  // quick + exit IP lookup and expectations
+)
+
+// ChecksConfig controls the preflight checklist run before every launch.
+type ChecksConfig struct {
+	// OnStart is off | quick | full (default full).
+	OnStart string `toml:"on_start" json:"on_start"`
+	// CacheSeconds reuses a passing result for this long (default 600).
+	CacheSeconds int `toml:"cache_seconds" json:"cache_seconds"`
+	// ExpectCountry (ISO code, e.g. "US") refuses to run if the exit IP is
+	// elsewhere — protects against a proxy that silently changes location.
+	ExpectCountry string `toml:"expect_country,omitempty" json:"expect_country,omitempty"`
+	// ExpectIP refuses to run unless the exit IP matches exactly.
+	ExpectIP string `toml:"expect_ip,omitempty" json:"expect_ip,omitempty"`
+}
+
+// Level returns the effective on-start level.
+func (c ChecksConfig) Level() string {
+	if c.OnStart == "" {
+		return CheckFull
+	}
+	return c.OnStart
+}
+
+// Cache returns the effective cache duration.
+func (c ChecksConfig) Cache() time.Duration {
+	if c.CacheSeconds <= 0 {
+		return 10 * time.Minute
+	}
+	return time.Duration(c.CacheSeconds) * time.Second
 }
 
 type ProxyConfig struct {
@@ -89,11 +128,11 @@ type Share struct {
 
 type LiteConfig struct {
 	// IsolateHome points HOME/XDG dirs at a per-profile directory.
-	IsolateHome bool `toml:"isolate_home"`
+	IsolateHome bool `toml:"isolate_home" json:"isolate_home"`
 	// AllowTrustd lets the system certificate service run (needed by
 	// Go/Swift CLIs that verify TLS via the OS). trustd may contact OCSP/CRL
 	// servers directly from the real IP.
-	AllowTrustd bool `toml:"allow_trustd"`
+	AllowTrustd bool `toml:"allow_trustd" json:"allow_trustd"`
 }
 
 type VMConfig struct {
@@ -214,6 +253,12 @@ func (p *Profile) Defaults() {
 	if p.VM.IdleStopMinutes == 0 {
 		p.VM.IdleStopMinutes = 30
 	}
+	if p.Checks.OnStart == "" {
+		p.Checks.OnStart = CheckFull
+	}
+	if p.Checks.CacheSeconds == 0 {
+		p.Checks.CacheSeconds = 600
+	}
 }
 
 // Validate checks every field. It never contacts the network.
@@ -271,6 +316,17 @@ func (p *Profile) Validate() error {
 	if !userRe.MatchString(p.VM.Username) || p.VM.Username == "root" {
 		add("invalid vm.username %q", p.VM.Username)
 	}
+	switch p.Checks.OnStart {
+	case "", CheckOff, CheckQuick, CheckFull:
+	default:
+		add("checks.on_start must be off, quick or full")
+	}
+	if c := p.Checks.ExpectCountry; c != "" && !regexp.MustCompile(`^[A-Z]{2}$`).MatchString(c) {
+		add("checks.expect_country must be a 2-letter ISO code like US (got %q)", c)
+	}
+	if ip := p.Checks.ExpectIP; ip != "" && net.ParseIP(ip) == nil {
+		add("checks.expect_ip is not an IP address: %q", ip)
+	}
 	if p.VM.CPUs < 1 || p.VM.MemoryMB < 512 || p.VM.DiskGB < 4 {
 		add("vm: cpus >= 1, memory_mb >= 512, disk_gb >= 4")
 	}
@@ -327,7 +383,8 @@ func Load(name string) (*Profile, error) {
 	file := filepath.Join(dir, "profile.toml")
 	st, err := os.Stat(file)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("profile %q does not exist (create it with: %s create %s --proxy ...)", name, App, name)
+		return nil, clierr.New(clierr.NotFound, fmt.Sprintf("%s list; %s create %s --proxy URL", App, App, name),
+			"profile %q does not exist", name)
 	}
 	if err != nil {
 		return nil, err
@@ -345,7 +402,8 @@ func Load(name string) (*Profile, error) {
 	}
 	p.Name = name
 	if err := p.Validate(); err != nil {
-		return nil, fmt.Errorf("profile %q is invalid:\n%w", name, err)
+		return nil, clierr.Wrap(clierr.Usage, fmt.Sprintf("fix with: %s set %s KEY=VALUE (or %s edit %s)", App, name, App, name),
+			fmt.Errorf("profile %q is invalid:\n%w", name, err))
 	}
 	return &p, nil
 }
