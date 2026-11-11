@@ -8,9 +8,9 @@ import (
 
 func TestGenerate(t *testing.T) {
 	sb, err := Generate(Options{ProxyPort: 51234, HatHome: "/Users/a/.hat",
-		ProfileHome: "/Users/a/.hat/profiles/us/home",
+		ProfileHome:       "/Users/a/.hat/profiles/us/home",
 		ReadableInHatHome: []string{"/Users/a/.hat/bin", "/Users/a/.hat/shims.toml"},
-		ReadOnly: []string{"/Users/a/ref"}})
+		ReadOnly:          []string{"/Users/a/ref"}})
 	if err != nil {
 		t.Fatal(err)
 	}

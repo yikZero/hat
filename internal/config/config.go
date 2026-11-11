@@ -240,7 +240,7 @@ func (p *Profile) Validate() error {
 		if _, err := upstream.New(p.Proxy.URL); err != nil {
 			errs = append(errs, err)
 		} else if !p.Proxy.AllowLocalUpstream && upstream.IsLocalHost(u.Hostname()) {
-			add("proxy %s is on a local/private address; set proxy.allow_local_upstream = true "+
+			add("proxy %s is on a local/private address; set proxy.allow_local_upstream = true (or pass --allow-local-upstream) "+
 				"if intended (the kill switch then depends on that proxy never connecting directly)", u.Host)
 		}
 	}

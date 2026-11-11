@@ -29,8 +29,14 @@ import (
 	"hat/internal/upstream"
 )
 
-// VfkitBin is the vfkit executable (found on PATH by default).
-var VfkitBin = "vfkit"
+// VfkitBin is the vfkit executable (found on PATH by default; override
+// with HAT_VFKIT).
+var VfkitBin = func() string {
+	if v := os.Getenv("HAT_VFKIT"); v != "" {
+		return v
+	}
+	return "vfkit"
+}()
 
 // Daemon hosts one profile's VM: vfkit + the proxy-only network stack +
 // the control socket.
@@ -240,6 +246,9 @@ func (d *Daemon) waitReady(ctx context.Context) error {
 		}
 		c, err := d.sshClient(ctx)
 		if err != nil {
+			if strings.Contains(err.Error(), "host key changed") {
+				return err // will not fix itself; fail fast
+			}
 			last = err
 			continue
 		}
