@@ -86,13 +86,17 @@ func TestOutputCancellation(t *testing.T) {
 
 type gatedWriter struct {
 	buf     bytes.Buffer
+	first   string
 	started chan struct{}
 	release chan struct{}
 	once    sync.Once
 }
 
 func (w *gatedWriter) Write(p []byte) (int, error) {
-	w.once.Do(func() { close(w.started) })
+	w.once.Do(func() {
+		w.first = string(p)
+		close(w.started)
+	})
 	<-w.release
 	return w.buf.Write(p)
 }
@@ -144,14 +148,10 @@ func TestRunCancellationWaitsForOutput(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("cancellation did not finish after output was released")
 			}
-			want := map[string]string{"stdout": "stdout", "stderr": "stderr", "combined": "stdoutstderr"}[stream]
-			got := w.buf.String()
-			if stream == "combined" {
-				if got != "stdoutstderr" && got != "stderrstdout" {
-					t.Fatalf("combined output %q", got)
-				}
-			} else if got != want {
-				t.Fatalf("output %q, want %q", got, want)
+			// Cancellation may stop the command before it emits both streams.
+			// The write already in progress must finish before Run returns.
+			if got := w.buf.String(); !strings.Contains(got, w.first) {
+				t.Fatalf("output %q missing in-flight write %q", got, w.first)
 			}
 		})
 	}
