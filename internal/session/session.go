@@ -211,7 +211,7 @@ func Run(ctx context.Context, c *ssh.Client, r Request) (int, error) {
 				s.Signal(name)
 			}
 		case <-ctx.Done():
-			s.Signal(ssh.SIGTERM)
+			stopSession(c, s, done)
 			return 130, ctx.Err()
 		}
 	}
@@ -257,9 +257,20 @@ func Output(ctx context.Context, c *ssh.Client, script string) (string, error) {
 		}
 		return stdout.String(), err
 	case <-ctx.Done():
-		s.Signal(ssh.SIGTERM)
+		stopSession(c, s, errc)
 		return stdout.String(), ctx.Err()
 	}
+}
+
+// stopSession joins the SSH output copies before their writers are returned to
+// the caller. If the guest no longer acknowledges channel closure, close the
+// connection too so cancellation does not wait indefinitely for the guest.
+func stopSession(c *ssh.Client, s *ssh.Session, done <-chan error) {
+	forceClose := time.AfterFunc(time.Second, func() { c.Close() })
+	defer forceClose.Stop()
+	s.Signal(ssh.SIGTERM)
+	s.Close()
+	<-done
 }
 
 type lockedWriter struct {

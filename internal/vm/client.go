@@ -207,6 +207,12 @@ func spawnDaemon(name string, paths Paths) error {
 	if err != nil {
 		return err
 	}
+	// On macOS os.Executable preserves the invoking shim's symlink path.
+	// Re-executing that path would dispatch as the shim instead of __daemon.
+	self, err = filepath.EvalSymlinks(self)
+	if err != nil {
+		return fmt.Errorf("resolving hat executable: %w", err)
+	}
 	logf, err := os.OpenFile(paths.DaemonLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
