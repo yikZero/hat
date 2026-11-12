@@ -51,9 +51,21 @@ func testServer(t *testing.T, clientKey ssh.PublicKey) net.Listener {
 							}
 							cmdline := string(req.Payload[4:])
 							req.Reply(true, nil)
-							cmd := exec.Command("sh", "-c", cmdline)
+							ctx, cancel := context.WithCancel(context.Background())
+							defer cancel()
+							go func() {
+								for req := range creqs {
+									req.Reply(false, nil)
+								}
+								cancel() // a closed channel must not leave the test command running
+							}()
+							cmd := exec.CommandContext(ctx, "sh", "-c", cmdline)
 							cmd.Stdin, cmd.Stdout, cmd.Stderr = ch, ch, ch.Stderr()
 							err := cmd.Run()
+							if cmd.ProcessState == nil { // cancelled before the command started
+								ch.Close()
+								return
+							}
 							if ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
 								p := ssh.Marshal(struct {
 									Sig  string
