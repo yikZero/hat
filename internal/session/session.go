@@ -88,7 +88,7 @@ func Command(r Request) string {
 	var b strings.Builder
 	if r.Dir != "" {
 		fmt.Fprintf(&b, "cd -- %s 2>/dev/null || { echo %s >&2; exit 125; }; ",
-			Quote(r.Dir), Quote("hat: directory "+r.Dir+" is not available in the VM (is it shared? see: hat share add)"))
+			Quote(r.Dir), Quote("hat: directory "+r.Dir+" is not available in the VM (is it shared? see: hat share add; a VM started before shares changed or before a hat update needs a restart: hat stop <profile>)"))
 	}
 	b.WriteString("exec env")
 	keys := make([]string, 0, len(r.Env))

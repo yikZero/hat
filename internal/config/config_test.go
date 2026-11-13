@@ -70,9 +70,10 @@ func TestValidate(t *testing.T) {
 }
 
 func TestGuestPath(t *testing.T) {
+	t.Setenv("HOME", "/Users/a")
 	p := New("x")
 	p.Share = []Share{{Path: "/Users/a/code"}}
-	for path, want := range map[string]string{"/Users/a/code": "/Users/a/code", "/Users/a/code/p/q": "/Users/a/code/p/q",
+	for path, want := range map[string]string{"/Users/a/code": "/home/dev/code", "/Users/a/code/p/q": "/home/dev/code/p/q",
 		"/Users/a/codex": "", "/Users/a": ""} {
 		if got, _, ok := p.GuestPath(path); got != want || ok != (want != "") {
 			t.Errorf("%s: got %q %v", path, got, ok)
@@ -93,12 +94,12 @@ func TestGuestPathThroughSymlinkAlias(t *testing.T) {
 	p := New("x")
 	p.Share = []Share{{Path: filepath.Join(alias, "proj")}}
 	got, _, ok := p.GuestPath(filepath.Join(real, "proj", "sub"))
-	if !ok || got != filepath.Join(alias, "proj", "sub") {
+	if !ok || got != filepath.Join(p.GuestMount(filepath.Join(alias, "proj")), "sub") {
 		t.Fatalf("real cwd under aliased share: %q %v", got, ok)
 	}
 	p.Share = []Share{{Path: filepath.Join(real, "proj")}}
 	got, _, ok = p.GuestPath(filepath.Join(alias, "proj"))
-	if !ok || got != filepath.Join(real, "proj") {
+	if !ok || got != p.GuestMount(filepath.Join(real, "proj")) {
 		t.Fatalf("aliased cwd under real share: %q %v", got, ok)
 	}
 	// innermost share wins
@@ -146,12 +147,61 @@ func TestGuestPathInnerShareThroughLongOuterAlias(t *testing.T) {
 	p.Share = []Share{{Path: alias}, {Path: inner, ReadOnly: true}}
 	for _, cwd := range []string{filepath.Join(alias, "sub"), inner} {
 		guest, chosen, ok := p.GuestPath(cwd)
-		if !ok || !chosen.ReadOnly || guest != inner {
+		if !ok || !chosen.ReadOnly || guest != p.GuestMount(inner) {
 			t.Fatalf("cwd %s: inner share not selected: guest=%q share=%+v ok=%v", cwd, guest, chosen, ok)
 		}
 	}
 	// The outer share still applies outside the inner one.
-	if guest, chosen, ok := p.GuestPath(alias); !ok || chosen.ReadOnly || guest != alias {
+	if guest, chosen, ok := p.GuestPath(alias); !ok || chosen.ReadOnly || guest != p.GuestMount(alias) {
 		t.Fatalf("outer: guest=%q share=%+v ok=%v", guest, chosen, ok)
+	}
+}
+
+// Guest mounts never contain the host home path (it carries the macOS
+// account name) and never shadow the guest ~/.ssh.
+func TestGuestMount(t *testing.T) {
+	const home = "/Users/alice"
+	for host, want := range map[string]string{
+		"/Users/alice/code":          "/home/dev/code",
+		"/Users/alice/code/p":        "/home/dev/code/p",
+		"/Users/alice":               "/mnt/host-home",
+		"/Users/alice/.ssh":          "/mnt/host-home/.ssh",
+		"/Users/alice/.ssh/keys":     "/mnt/host-home/.ssh/keys",
+		"/Users/alice/.sshfoo":       "/home/dev/.sshfoo",
+		"/Users/alicex/code":         "/mnt/host/Users/alicex/code",
+		"/Volumes/Data/proj":         "/mnt/host/Volumes/Data/proj",
+		"/private/tmp/x":             "/mnt/host/private/tmp/x",
+		"/":                          "/mnt/host",
+		"/Users/alice/a b/it's here": "/home/dev/a b/it's here",
+	} {
+		if got := guestMount(host, home, "/home/dev"); got != want {
+			t.Errorf("%s: got %q want %q", host, got, want)
+		}
+	}
+	t.Setenv("HOME", home)
+	p := New("x")
+	p.VM.Username = "bob"
+	if got := p.GuestMount("/Users/alice/code"); got != "/home/bob/code" {
+		t.Errorf("username not used: %q", got)
+	}
+	if got := p.GuestMount("~/code"); got != "/home/bob/code" {
+		t.Errorf("~ not expanded: %q", got)
+	}
+	if got := p.GuestMount("~"); got != GuestHostHome {
+		t.Errorf("~ not expanded: %q", got)
+	}
+}
+
+func TestDefaultHostname(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 200; i++ {
+		h := New("x").VM.Hostname
+		if !hostnameRe.MatchString(h) || strings.Contains(h, "hat") {
+			t.Fatalf("bad default hostname %q", h)
+		}
+		seen[h] = true
+	}
+	if len(seen) < 3 {
+		t.Fatalf("default hostname barely varies: %v", seen)
 	}
 }

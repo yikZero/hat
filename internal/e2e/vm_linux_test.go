@@ -91,11 +91,14 @@ func setup(t *testing.T) *harness {
 func TestVMLifecycle(t *testing.T) {
 	h := setup(t)
 
-	out, errOut, code := h.run("piped\n", "run", "e2e", "--", "sh", "-c", `echo "$TZ|$LANG|$HAT_ACTIVE|$(pwd)"; cat; exit 3`)
+	out, errOut, code := h.run("piped\n", "run", "e2e", "--", "sh", "-c", `echo "$TZ|$LANG|${HAT_ACTIVE-unset}|$GUEST_PWD|$(pwd)"; cat; exit 3`)
 	if code != 3 {
 		t.Fatalf("exit %d, stderr:\n%s\ndaemon log:\n%s", code, errOut, h.daemonLog())
 	}
-	want := "Asia/Tokyo|ja_JP.UTF-8|e2e|" + h.share + "\npiped\n"
+	// The share is mounted below the guest home, not at its host path
+	// (which would carry the host account name), and nothing in the guest
+	// environment names hat.
+	want := "Asia/Tokyo|ja_JP.UTF-8|unset|/home/dev/project|" + h.share + "\npiped\n"
 	if out != want {
 		t.Fatalf("stdout %q want %q", out, want)
 	}
@@ -180,7 +183,7 @@ func (h *harness) daemonLog() string {
 
 // A share configured through a symlink alias (macOS: /tmp -> /private/tmp)
 // must match a cwd given as the real path, and the command must run in the
-// guest under the share's configured path.
+// guest under the mount of the share's configured path.
 func TestVMSharedThroughSymlinkAlias(t *testing.T) {
 	h := setup(t)
 	root := filepath.Dir(h.share)
@@ -193,7 +196,7 @@ func TestVMSharedThroughSymlinkAlias(t *testing.T) {
 	if _, e, c := h.run("", "share", "add", "e2e", alias); c != 0 {
 		t.Fatalf("share add: %s", e)
 	}
-	cmd := exec.Command(h.hat, "run", "e2e", "--", "sh", "-c", `echo "$PWD"`) // logical path, as the guest cd set it
+	cmd := exec.Command(h.hat, "run", "e2e", "--", "sh", "-c", `echo "$GUEST_PWD"`) // the guest dir hat cd'ed to
 	var env []string
 	for _, kv := range h.env {
 		if !strings.HasPrefix(kv, "PWD=") {
@@ -206,7 +209,7 @@ func TestVMSharedThroughSymlinkAlias(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run from real path: %v %s", err, out)
 	}
-	if got := strings.TrimSpace(string(out)); got != filepath.Join(alias, "sub") {
-		t.Fatalf("guest cwd %q, want %q", got, filepath.Join(alias, "sub"))
+	if got := strings.TrimSpace(string(out)); got != "/home/dev/proj-alias/sub" {
+		t.Fatalf("guest cwd %q, want %q", got, "/home/dev/proj-alias/sub")
 	}
 }

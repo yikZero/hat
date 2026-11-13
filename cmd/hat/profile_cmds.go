@@ -60,7 +60,7 @@ func cmdCreate(args []string) error {
 	mode := fs.String("mode", config.ModeVM, "vm (full isolation) or lite (sandbox only)")
 	tz := fs.String("tz", "", "IANA timezone, e.g. America/New_York")
 	locale := fs.String("locale", "", "locale, e.g. en_US.UTF-8")
-	hostname := fs.String("hostname", "", "VM hostname (default: random)")
+	hostname := fs.String("hostname", "", "VM hostname (default: a common name such as debian)")
 	username := fs.String("username", "", "VM user name (default: dev)")
 	keychain := fs.Bool("keychain", false, "store the proxy password in the macOS Keychain (prompts)")
 	allowLocal := fs.Bool("allow-local-upstream", false, "allow a proxy on localhost/LAN (e.g. local Clash)")
@@ -533,7 +533,11 @@ func cmdShare(args []string) error {
 			if s.ReadOnly {
 				mode = "ro"
 			}
-			fmt.Printf("%s\t%s\n", mode, s.Path)
+			if p.Mode == config.ModeVM {
+				fmt.Printf("%s\t%s\t-> %s\n", mode, s.Path, p.GuestMount(s.Path))
+			} else {
+				fmt.Printf("%s\t%s\n", mode, s.Path)
+			}
 		}
 		return nil
 	case "add", "rm":
@@ -565,6 +569,9 @@ func cmdShare(args []string) error {
 	}
 	fmt.Printf("%s: %s %s\n", p.Name, map[string]string{"add": "shared", "rm": "unshared"}[sub], abs)
 	if p.Mode == config.ModeVM {
+		if sub == "add" {
+			fmt.Printf("In the VM: %s\n", p.GuestMount(abs))
+		}
 		if st, err := vm.Status(context.Background(), p.Name); err == nil && st.State != "" {
 			fmt.Printf("The VM is running; restart it to apply: %s stop %s\n", config.App, p.Name)
 		}

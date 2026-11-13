@@ -79,13 +79,16 @@ if [ "$LITE_ONLY" = 0 ]; then
     t0=$(now); out=$("$HAT" run smoke-vm -- echo warm); [ "$out" = warm ] && ok "warm exec ($(python3 -c "print(round(($(now)-$t0)*1000))" 2>/dev/null) ms)" || bad "warm exec: $out"
     expect_code "exit code passthrough" 42 "$HAT" run smoke-vm -- sh -c 'exit 42'
     out=$(echo hello | "$HAT" run smoke-vm -- cat); [ "$out" = hello ] && ok "stdin pipe" || bad "stdin pipe: $out"
-    out=$("$HAT" run smoke-vm -- sh -c 'echo "$TZ $LANG $(pwd)"'); [ "$out" = "Asia/Tokyo ja_JP.UTF-8 $WORK" ] && ok "TZ/LANG/cwd" || bad "TZ/LANG/cwd: $out"
+    GUEST_WORK="/mnt/host$WORK"   # outside the home directory: /mnt/host + host path
+    out=$("$HAT" run smoke-vm -- sh -c 'echo "$TZ $LANG $(pwd)"'); [ "$out" = "Asia/Tokyo ja_JP.UTF-8 $GUEST_WORK" ] && ok "TZ/LANG/cwd" || bad "TZ/LANG/cwd: $out"
+    out=$("$HAT" run smoke-vm -- sh -c 'cat /var/lib/cloud/data/instance-id; env | grep -c "^HAT_"; grep -c /Users/ /proc/mounts; awk "\$3==\"virtiofs\"{print \$1}" /proc/mounts | grep -c "^hat"; ls -d /var/lib/hat-* /etc/sysctl.d/*hat* /etc/ssh/sshd_config.d/*hat* 2>/dev/null | wc -l | tr -d " "' 2>&1)
+    [ "$out" = "$(printf 'iid-local01\n0\n0\n0\n0')" ] && ok "no hat traces in the guest" || bad "hat traces in the guest (instance-id, HAT_ env, /Users mounts, hat tags, hat files): $(echo $out)"
     "$HAT" run smoke-vm -- sh -c 'echo from-vm > file-from-vm'; [ "$(cat file-from-vm 2>/dev/null)" = from-vm ] && ok "write to shared dir" || bad "write to shared dir"
     owner=$(stat -f %u file-from-vm 2>/dev/null); [ "$owner" = "$(id -u)" ] && ok "file owner is you ($owner)" || bad "file owner $owner"
     expect_code "unshared cwd refused" 125 sh -c "cd / && '$HAT' run smoke-vm -- true"
     REAL="$(cd "$WORK" && pwd -P)"   # /private/tmp/... on macOS
     out=$(cd "$REAL" && env -u PWD "$HAT" run smoke-vm -- sh -c 'echo "$PWD"' 2>/dev/null)
-    [ "$out" = "$WORK" ] && ok "cwd via symlink alias ($REAL) maps to the share" || bad "cwd via symlink alias: got '$out', want '$WORK'"
+    [ "$out" = "$GUEST_WORK" ] && ok "cwd via symlink alias ($REAL) maps to the share" || bad "cwd via symlink alias: got '$out', want '$GUEST_WORK'"
     "$HAT" stop smoke-vm >/dev/null && ok "stop" || bad "stop"
     t0=$(now); out=$("$HAT" run smoke-vm -- hostname); [ "$out" = smoke-box ] && ok "restart + hostname ($(python3 -c "print(round($(now)-$t0))" 2>/dev/null)s)" || bad "restart: $out"
     pid=$("$HAT" status smoke-vm --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["pid"])' 2>/dev/null)
