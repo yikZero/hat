@@ -148,9 +148,10 @@ func runVM(p *config.Profile, argv []string, o runOpts) (int, error) {
 		return 1, clierr.Wrap(clierr.VMFailed, "hat status "+p.Name, fmt.Errorf("connecting to the VM: %w", err))
 	}
 	defer client.Close()
-	env := map[string]string{
-		"LANG": p.Locale, "LC_ALL": p.Locale, "TZ": p.Timezone, config.EnvActive: p.Name,
-	}
+	// No HAT_ACTIVE here: there is no hat (or shim) in the guest to guard
+	// against nesting, and the variable would tell every program in the VM
+	// that it runs under hat, and in which profile.
+	env := map[string]string{"LANG": p.Locale, "LC_ALL": p.Locale, "TZ": p.Timezone}
 	for _, k := range []string{"COLORTERM", "NO_COLOR", "FORCE_COLOR", "CLICOLOR"} {
 		if v, ok := os.LookupEnv(k); ok {
 			env[k] = v

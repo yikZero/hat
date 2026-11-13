@@ -4,6 +4,11 @@
 // hat's unixgram network socket like vfkit does and runs a guest made of a
 // gVisor stack (static IP 192.168.127.2) with a tiny SSH server on port 22
 // that executes commands on the host with sh.
+//
+// The guest's virtio-fs mounts are emulated by path translation: the mount
+// commands of hat's reconcile script are recorded, and a command that
+// starts with "cd -- <guest dir>" runs in the matching host directory with
+// GUEST_PWD set to the guest directory.
 package main
 
 import (
@@ -16,8 +21,10 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 
 	"golang.org/x/crypto/ssh"
@@ -47,6 +54,19 @@ func main() {
 			v := args[i+1]
 			if strings.HasPrefix(v, "virtio-blk,path=") {
 				disk = strings.TrimPrefix(v, "virtio-blk,path=")
+			}
+			if strings.HasPrefix(v, "virtio-fs,") {
+				var dir, tag string
+				for _, kv := range strings.Split(v, ",")[1:] {
+					k, val, _ := strings.Cut(kv, "=")
+					switch k {
+					case "sharedDir":
+						dir = val
+					case "mountTag":
+						tag = val
+					}
+				}
+				tags[tag] = dir
 			}
 			if strings.HasPrefix(v, "virtio-net,") {
 				for _, kv := range strings.Split(v, ",")[1:] {
@@ -141,14 +161,15 @@ func serve(c net.Conn, cfg *ssh.ServerConfig, machineID string) {
 				req.Reply(true, nil)
 				code := 0
 				switch {
-				case strings.Contains(cmdline, "hat-provisioned"):
+				case strings.Contains(cmdline, "/proc/sys/kernel/random/boot_id"): // ready probe
 					fmt.Fprintln(ch, machineID)
 				case strings.Contains(cmdline, "systemctl poweroff"):
 					go func() { syscall.Kill(os.Getpid(), syscall.SIGTERM) }()
 				case strings.HasPrefix(cmdline, "set -e"):
-					// reconcile script: pretend success
+					// reconcile script: record the mounts, pretend success
+					recordMounts(cmdline)
 				default:
-					cmd := exec.Command("sh", "-c", cmdline)
+					cmd := exec.Command("sh", "-c", translateCd(cmdline))
 					cmd.Stdin, cmd.Stdout, cmd.Stderr = ch, ch, ch.Stderr()
 					if err := cmd.Run(); err != nil {
 						code = cmd.ProcessState.ExitCode()
@@ -162,6 +183,74 @@ func serve(c net.Conn, cfg *ssh.ServerConfig, machineID string) {
 		}()
 	}
 }
+
+var (
+	tags   = map[string]string{} // virtio-fs tag -> host dir (set before serving)
+	mu     sync.Mutex
+	mounts = map[string]string{} // guest dir -> host dir
+)
+
+var mountRe = regexp.MustCompile(`(?m)mount -t virtiofs -o \S+ (\S+) (.+)$`)
+
+func recordMounts(script string) {
+	mu.Lock()
+	defer mu.Unlock()
+	for _, m := range mountRe.FindAllStringSubmatch(script, -1) {
+		if guest, rest := unquote(m[2]); rest == "" {
+			mounts[guest] = tags[m[1]]
+		}
+	}
+}
+
+// translateCd rewrites a leading "cd -- <guest dir>" to the host directory
+// it is mounted from.
+func translateCd(cmdline string) string {
+	rest, ok := strings.CutPrefix(cmdline, "cd -- ")
+	if !ok {
+		return cmdline
+	}
+	guest, rest := unquote(rest)
+	mu.Lock()
+	defer mu.Unlock()
+	best := ""
+	for g := range mounts {
+		if (guest == g || strings.HasPrefix(guest, g+"/")) && len(g) > len(best) {
+			best = g
+		}
+	}
+	if best == "" {
+		return cmdline // not mounted: the cd fails as in a real guest
+	}
+	host := mounts[best] + strings.TrimPrefix(guest, best)
+	return "GUEST_PWD=" + quote(guest) + "; export GUEST_PWD; cd -- " + quote(host) + rest
+}
+
+// unquote reads one word quoted like session.Quote and returns the rest.
+func unquote(s string) (word, rest string) {
+	if !strings.HasPrefix(s, "'") {
+		word, rest, _ = strings.Cut(s, " ")
+		if rest != "" {
+			rest = " " + rest
+		}
+		return word, rest
+	}
+	var b strings.Builder
+	for i := 1; i < len(s); i++ {
+		if s[i] != '\'' {
+			b.WriteByte(s[i])
+			continue
+		}
+		if strings.HasPrefix(s[i:], `'\''`) {
+			b.WriteByte('\'')
+			i += 3
+			continue
+		}
+		return b.String(), s[i+1:]
+	}
+	return b.String(), ""
+}
+
+func quote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 func check(err error) {
 	if err != nil {

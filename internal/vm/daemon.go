@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -190,8 +191,9 @@ func (d *Daemon) boot(ctx context.Context) error {
 		if _, err := os.Stat(s.Path); err != nil {
 			return fmt.Errorf("shared directory %s: %w", s.Path, err)
 		}
-		// vfkit gets the resolved host path; the guest mounts it at s.Path.
-		vshares = append(vshares, VfkitShare{Tag: "hat" + strconv.Itoa(i), Path: config.RealPath(s.Path)})
+		// vfkit gets the resolved host path; the guest mounts it at
+		// GuestMount(s.Path) (see reconcile).
+		vshares = append(vshares, VfkitShare{Tag: ShareTag(i), Path: config.RealPath(s.Path)})
 	}
 	args, err := VfkitArgs(VfkitOptions{
 		CPUs: d.p.VM.CPUs, MemoryMB: d.p.VM.MemoryMB, EFIVars: d.paths.EFIVars, Disk: d.paths.Disk,
@@ -235,8 +237,65 @@ func (d *Daemon) boot(ctx context.Context) error {
 
 // ReadyProbe prints the machine-id only once first-boot provisioning has
 // finished AND the VM has rebooted since (cloud-init reboots at the end of
-// the first boot to apply the machine-id).
-const ReadyProbe = `test -f /var/lib/hat-provisioned && ! grep -qx "$(cat /proc/sys/kernel/random/boot_id)" /var/lib/hat-firstboot-id 2>/dev/null && cat /etc/machine-id`
+// the first boot to apply the machine-id). VMs provisioned by older
+// versions used hat-named markers; reconcile renames them, so both are
+// accepted here.
+const ReadyProbe = `if test -f ` + ProvisionedMarker + `; then f=` + FirstBootMarker + `; ` +
+	`elif test -f ` + legacyProvisionedMarker + `; then f=` + legacyFirstBootMarker + `; else exit 1; fi; ` +
+	`! grep -qx "$(cat /proc/sys/kernel/random/boot_id)" "$f" 2>/dev/null && cat /etc/machine-id`
+
+// Files older versions wrote into the guest under hat-specific names, and
+// the neutral names they have now. Anything in the guest can read them.
+const (
+	legacyProvisionedMarker = "/var/lib/hat-provisioned"
+	legacyFirstBootMarker   = "/var/lib/hat-firstboot-id"
+	legacySysctlConf        = "/etc/sysctl.d/90-hat.conf"
+	legacySSHDConf          = "/etc/ssh/sshd_config.d/90-hat.conf"
+)
+
+// migrateGuestScript renames hat-named files left by older versions
+// (idempotent; part of the set -e reconcile script).
+var migrateGuestScript = fmt.Sprintf(`if [ -e %[1]s ]; then sudo mkdir -p %[2]s; `+
+	`[ ! -e %[3]s ] || sudo mv -f %[3]s %[4]s; sudo mv -f %[1]s %[5]s; fi
+[ ! -e %[6]s ] || sudo mv -f %[6]s %[7]s
+[ ! -e %[8]s ] || sudo mv -f %[8]s %[9]s
+`, legacyProvisionedMarker, markerDir, legacyFirstBootMarker, FirstBootMarker, ProvisionedMarker,
+	legacySysctlConf, SysctlConf, legacySSHDConf, SSHDConf)
+
+// ShareTag is the virtio-fs tag of the i-th share. It is visible in the
+// guest (/proc/mounts), so it is deliberately generic.
+func ShareTag(i int) string { return "share" + strconv.Itoa(i) }
+
+// MountScript mounts shares (as returned by ExpandedShares, in that order,
+// which matches their tags) at their guest mount points. Mount points below
+// the guest home are created as the guest user so the user owns them.
+func MountScript(p *config.Profile, shares []config.Share) string {
+	type mnt struct {
+		tag, path string
+		ro        bool
+	}
+	ms := make([]mnt, len(shares))
+	for i, s := range shares {
+		ms[i] = mnt{ShareTag(i), p.GuestMount(s.Path), s.ReadOnly}
+	}
+	// Parents before children.
+	sort.SliceStable(ms, func(i, j int) bool { return ms[i].path < ms[j].path })
+	q := session.Quote
+	home := p.GuestHome() + "/"
+	var sb strings.Builder
+	for _, m := range ms {
+		opt, mkdir := "rw", "sudo mkdir -p"
+		if m.ro {
+			opt = "ro"
+		}
+		if strings.HasPrefix(m.path, home) {
+			mkdir = "mkdir -p"
+		}
+		fmt.Fprintf(&sb, "%s %s; mountpoint -q %s || sudo mount -t virtiofs -o %s %s %s\n",
+			mkdir, q(m.path), q(m.path), opt, m.tag, q(m.path))
+	}
+	return sb.String()
+}
 
 // waitReady waits until SSH works, first-boot provisioning has finished
 // (machine-id applied after the reboot), then reconciles settings.
@@ -296,15 +355,9 @@ func (d *Daemon) reconcile(ctx context.Context, c *ssh.Client) error {
 	fmt.Fprintf(&sb, "sudo date -u -s @%d >/dev/null\n", time.Now().Unix())
 	fmt.Fprintf(&sb, "[ \"$(hostname)\" = %s ] || sudo hostnamectl set-hostname %s\n", q(d.p.VM.Hostname), q(d.p.VM.Hostname))
 	fmt.Fprintf(&sb, "sudo timedatectl set-timezone %s\n", q(d.p.Timezone))
+	sb.WriteString(migrateGuestScript)
 	shares, _ := d.p.ExpandedShares()
-	for i, s := range shares {
-		opt := "rw"
-		if s.ReadOnly {
-			opt = "ro"
-		}
-		fmt.Fprintf(&sb, "sudo mkdir -p %s; mountpoint -q %s || sudo mount -t virtiofs -o %s hat%d %s\n",
-			q(s.Path), q(s.Path), opt, i, q(s.Path))
-	}
+	sb.WriteString(MountScript(d.p, shares))
 	out, err := session.Output(ctx, c, sb.String())
 	if err != nil {
 		return fmt.Errorf("applying profile settings in the VM: %v: %s", err, strings.TrimSpace(out))

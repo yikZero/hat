@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"hat/internal/config"
 )
@@ -25,7 +26,9 @@ func Prepare(ctx context.Context, p *config.Profile, log io.Writer) error {
 			return err
 		}
 	}
-	if _, err := os.Stat(paths.Disk); os.IsNotExist(err) {
+	_, err = os.Stat(paths.Disk)
+	newDisk := os.IsNotExist(err)
+	if newDisk {
 		base, err := EnsureImage(ctx, p.VM.Image, log)
 		if err != nil {
 			return fmt.Errorf("guest image: %w", err)
@@ -40,7 +43,7 @@ func Prepare(ctx context.Context, p *config.Profile, log io.Writer) error {
 		return err
 	}
 	in := SeedInput{
-		InstanceID:    "hat-" + p.Name + "-" + st.MachineID[:8],
+		InstanceID:    instanceID(paths.MetaData, newDisk, p.Name, st.MachineID),
 		Hostname:      p.VM.Hostname,
 		Username:      p.VM.Username,
 		UID:           GuestUID,
@@ -54,4 +57,23 @@ func Prepare(ctx context.Context, p *config.Profile, log io.Writer) error {
 		return err
 	}
 	return config.WriteFileAtomic(paths.MetaData, []byte(MetaData(in)), 0o600)
+}
+
+// instanceID keeps the cloud-init instance-id a disk was provisioned with:
+// a new one would make cloud-init treat the VM as a new instance and
+// provision it again (new SSH host keys, provision commands re-run). New
+// disks get DefaultInstanceID; disks from versions that did not record one
+// in meta-data used "hat-<profile>-<machine-id prefix>".
+func instanceID(metaData string, newDisk bool, profile, machineID string) string {
+	if !newDisk {
+		if b, err := os.ReadFile(metaData); err == nil {
+			for _, line := range strings.Split(string(b), "\n") {
+				if v, ok := strings.CutPrefix(line, "instance-id:"); ok && strings.TrimSpace(v) != "" {
+					return strings.TrimSpace(v)
+				}
+			}
+		}
+		return "hat-" + profile + "-" + machineID[:8]
+	}
+	return DefaultInstanceID
 }

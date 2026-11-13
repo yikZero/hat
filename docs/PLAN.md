@@ -46,7 +46,8 @@ vfkit --cpus N --memory MB --pidfile <run>/vfkit.pid
 
 ### 2.3 镜像与身份
 - Debian 13 `genericcloud-arm64` tar.xz（~214MB），纯 Go 解压为稀疏 raw → `~/.hat/images/`；每个 profile `clonefile` 复制 + 扩容。
-- cloud-init（NoCloud）：hostname、时区、locale、用户（**uid 501 / gid 20**，与宿主一致，NOPASSWD sudo，profile 专属 SSH 公钥）、写 `/etc/machine-id`、挂载共享目录到**同一绝对路径**、关闭 apt-daily/unattended-upgrades/motd-news/timesyncd/IPv6、首启结束后重启一次（让 machine-id 生效）。
+- cloud-init（NoCloud）：hostname、时区、locale、用户（**uid 501 / gid 20**，与宿主一致，NOPASSWD sudo，profile 专属 SSH 公钥）、写 `/etc/machine-id`、挂载共享目录（不用宿主路径，避免 `/Users/<账户名>` 进入 cwd：宿主 home 下 → guest home 下同一相对路径；home 本身 → `/mnt/host-home`；其他 → `/mnt/host/<路径>`；virtio-fs tag 为 `share<N>`）、关闭 apt-daily/unattended-upgrades/motd-news/timesyncd/IPv6、首启结束后重启一次（让 machine-id 生效）。
+- 来宾内不留 hat 字样：instance-id 为 `iid-local01`（旧 VM 保留原值，改了会让 cloud-init 重新初始化）、标记文件在 `/var/lib/misc/`、配置文件名中性、会话环境不带 `HAT_ACTIVE`；旧 VM 的 hat 命名文件在启动时改名。默认 hostname 取常见名（如 `debian`、`devbox`），不生成固定格式。
 - 时间：每次 `run` 通过 ssh `sudo date -s @<epoch>` 校准（不依赖 NTP / qemu-ga）。
 - 已知限制（文档写明）：vfkit 每次启动随机 GenericMachineIdentifier（只有 root 能读 DMI）；DMI 显示 Apple Virtualization；共享目录只读只能在 guest 内软实现；不能共享单文件（启动时复制进去）；改共享目录需重启 VM。
 

@@ -26,6 +26,8 @@ func jsonFlag(fs *flag.FlagSet) {
 type shareView struct {
 	Path     string `json:"path"`
 	ReadOnly bool   `json:"read_only"`
+	// Guest is where vm profiles mount it (empty for lite).
+	Guest string `json:"guest,omitempty"`
 }
 
 type profileView struct {
@@ -61,7 +63,11 @@ func viewOf(p *config.Profile) profileView {
 		Locale: p.Locale, Timezone: p.Timezone, Env: p.Env, Checks: p.Checks, Dir: dir, Shares: []shareView{}}
 	if shares, err := p.ExpandedShares(); err == nil {
 		for _, s := range shares {
-			v.Shares = append(v.Shares, shareView{s.Path, s.ReadOnly})
+			sv := shareView{Path: s.Path, ReadOnly: s.ReadOnly}
+			if p.Mode == config.ModeVM {
+				sv.Guest = p.GuestMount(s.Path)
+			}
+			v.Shares = append(v.Shares, sv)
 		}
 	}
 	if p.Mode == config.ModeLite {

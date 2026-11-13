@@ -30,6 +30,9 @@ hat run <p> -- <command> [args...]
 - Exit 127 = command not found in the profile.
 - vm profiles run the *Linux* program inside the VM and need the current
   directory to be shared (`hat share add <p> <dir>`), or pass `--home`.
+  The directory has a different path in the VM (`~/x` → `/home/<user>/x`,
+  other paths → `/mnt/host/<path>`; see `hat --json show <p>`,
+  `shares[].guest`): pass relative paths, not absolute macOS paths.
 - `-T` forces no TTY (use for captured output); stdin is streamed.
 - A launch checklist (preflight) runs first and is cached ~10 min; it fails
   with code `PREFLIGHT_FAILED` / `EGRESS_MISMATCH` if the proxy is down or

@@ -248,7 +248,7 @@ func (p *Profile) Defaults() {
 		p.VM.Username = "dev"
 	}
 	if p.VM.Hostname == "" {
-		p.VM.Hostname = "host-" + randHex(3)
+		p.VM.Hostname = RandomHostname()
 	}
 	if p.VM.IdleStopMinutes == 0 {
 		p.VM.IdleStopMinutes = 30
@@ -356,12 +356,61 @@ func (p *Profile) ExpandedShares() ([]Share, error) {
 	return out, nil
 }
 
+// Guest mount roots for shares that are not below the host home directory.
+const (
+	GuestHostHome = "/mnt/host-home" // the host home directory itself
+	GuestHostRoot = "/mnt/host"      // any other host path, appended as is
+)
+
+// GuestHome is the guest user's home directory.
+func (p *Profile) GuestHome() string { return "/home/" + p.VM.Username }
+
+// GuestMount returns where a share (a cleaned, ~-expanded host path as
+// returned by ExpandedShares) is mounted inside the VM. Host paths are not
+// reused, so the macOS account name in /Users/<name> never reaches the guest
+// (programs report their working directory):
+//
+//	below the host home  -> same relative path below the guest home
+//	                        (~/code/x -> /home/<user>/code/x)
+//	~/.ssh and below     -> below /mnt/host-home (the guest ~/.ssh holds
+//	                        the key hat logs in with)
+//	the host home itself -> /mnt/host-home
+//	anything else        -> /mnt/host + host path
+//
+// The three ranges do not overlap, so distinct shares get distinct mounts.
+func (p *Profile) GuestMount(hostPath string) string {
+	uh, _ := os.UserHomeDir()
+	if hostPath == "~" {
+		hostPath = uh
+	} else if rest, ok := strings.CutPrefix(hostPath, "~/"); ok {
+		hostPath = filepath.Join(uh, rest)
+	}
+	return guestMount(filepath.Clean(hostPath), filepath.Clean(uh), p.GuestHome())
+}
+
+func guestMount(hostPath, hostHome, guestHome string) string {
+	if hostHome != "" && hostHome != "/" && hostHome != "." {
+		if hostPath == hostHome {
+			return GuestHostHome
+		}
+		if rel, ok := strings.CutPrefix(hostPath, hostHome+"/"); ok {
+			if rel == ".ssh" || strings.HasPrefix(rel, ".ssh/") {
+				return GuestHostHome + "/" + rel
+			}
+			return guestHome + "/" + rel
+		}
+	}
+	if hostPath == "/" {
+		return GuestHostRoot
+	}
+	return GuestHostRoot + hostPath
+}
+
 // GuestPath maps a host directory to its path inside the VM. Matching and
 // priority use real paths only (symlinks resolved), so an alias spelling —
 // on macOS /tmp is /private/tmp — never changes which share is chosen; the
 // innermost share containing the directory wins. The result is expressed
-// under the chosen share's configured path, which is where the guest
-// mounts it.
+// under the chosen share's guest mount (GuestMount of its configured path).
 func (p *Profile) GuestPath(hostPath string) (guest string, share Share, ok bool) {
 	shares, err := p.ExpandedShares()
 	if err != nil {
@@ -385,7 +434,7 @@ func (p *Profile) GuestPath(hostPath string) (guest string, share Share, ok bool
 		if err != nil {
 			continue
 		}
-		best, guest, share, ok = depth, filepath.Join(s.Path, rel), s, true
+		best, guest, share, ok = depth, filepath.Join(p.GuestMount(s.Path), rel), s, true
 	}
 	return guest, share, ok
 }
@@ -539,6 +588,21 @@ func RandomMAC() string {
 		parts[i] = fmt.Sprintf("%02x", x)
 	}
 	return strings.Join(parts, ":")
+}
+
+// commonHostnames are names many ordinary Linux machines use. A default
+// hostname is picked from them rather than generated, so it blends in
+// instead of carrying a recognisable pattern (programs report it).
+var commonHostnames = []string{
+	"debian", "devbox", "dev", "workstation", "linux", "homelab",
+	"dev-vm", "buildbox", "lab", "box", "sandbox", "work",
+}
+
+// RandomHostname returns one of commonHostnames.
+func RandomHostname() string {
+	b := make([]byte, 1)
+	rand.Read(b)
+	return commonHostnames[int(b[0])%len(commonHostnames)]
 }
 
 func randHex(n int) string {
