@@ -63,17 +63,32 @@ func TestGitPathScriptMapsWorktree(t *testing.T) {
 	}
 
 	// Emulate the guest: /home/dev is a view of the host home, sudo is a
-	// no-op and a bind mount is a copy. git must then work in the worktree
-	// through the guest paths.
+	// no-op and a bind mount is a hard link, so writes to its source also
+	// reach the published pointer. Reject those writes: a concurrent git
+	// process could otherwise observe the file after tee truncates it.
 	guest := t.TempDir()
 	os.MkdirAll(filepath.Join(guest, "home"), 0o755)
 	if err := os.Symlink(home, filepath.Join(guest, "home", "dev")); err != nil {
 		t.Skip(err)
 	}
-	emu := strings.NewReplacer("/home/dev", guest+"/home/dev", gitPathsDir, guest+"/run", "sudo mount --bind", "cp",
+	emu := strings.NewReplacer("/home/dev", guest+"/home/dev", gitPathsDir, guest+"/run", "sudo mount --bind", "bind_file",
 		"sudo ", "").Replace(script)
+	emu = `bind_file() { ln -f "$1" "$2"; }
+tee() {
+  for published in "$MAPPED_WORKTREE" "$MAPPED_BACKLINK"; do
+    if [ "$1" -ef "$published" ]; then
+      echo 'overwriting a published git pointer' >&2
+      return 1
+    fi
+  done
+  command tee "$@"
+}
+` + emu
 	for i := 0; i < 2; i++ { // idempotent
-		if out, err := exec.Command("sh", "-c", emu).CombinedOutput(); err != nil {
+		cmd := exec.Command("sh", "-c", emu)
+		cmd.Env = append(os.Environ(), "MAPPED_WORKTREE="+guest+"/home/dev/code/wt/.git",
+			"MAPPED_BACKLINK="+guest+"/home/dev/code/repo/.git/worktrees/wt/gitdir")
+		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("guest script: %v\n%s\n%s", err, out, emu)
 		}
 	}

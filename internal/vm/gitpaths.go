@@ -28,13 +28,18 @@ const gitConfigScript = `grep -qs 'worktreePruneExpire' /etc/gitconfig || ` +
 	`printf '\n[gc]\n\tworktreePruneExpire = never\n' | sudo tee -a /etc/gitconfig >/dev/null
 `
 
-// gitFixFunc is the guest shell function that makes file $1 read $2: it
-// writes the copy and bind-mounts it unless the file already says so. A
-// copy that is already mounted is updated in place.
-const gitFixFunc = `fix() { t=` + gitPathsDir + `/$(printf %s "$1" | sha256sum | cut -c1-24); ` +
-	`sudo mkdir -p ` + gitPathsDir + ` && printf '%s\n' "$2" | sudo tee "$t" >/dev/null && ` +
-	`sudo chown "$(id -u):$(id -g)" "$t" && ` +
-	`{ [ "$(cat "$1" 2>/dev/null)" = "$2" ] || sudo mount --bind "$t" "$1"; }; }
+// gitFixFunc makes file $1 read $2. Publish a complete, private copy:
+// truncating an already mounted copy would break concurrent git readers.
+// The bind mount keeps the inode alive after its temporary name is removed.
+const gitFixFunc = `fix() (
+  [ "$(cat "$1" 2>/dev/null)" = "$2" ] && exit 0
+  sudo mkdir -p ` + gitPathsDir + `
+  t=$(sudo mktemp ` + gitPathsDir + `/mapping.XXXXXX)
+  trap 'sudo rm -f "$t"' EXIT
+  printf '%s\n' "$2" | sudo tee "$t" >/dev/null
+  sudo chown "$(id -u):$(id -g)" "$t"
+  sudo mount --bind "$t" "$1"
+)
 `
 
 // GitPathScript returns a guest script that makes git usable in the VM when
