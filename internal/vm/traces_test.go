@@ -58,7 +58,8 @@ func TestInstanceIDKeptForExistingDisks(t *testing.T) {
 // sudo dropped.
 func guestSh(t *testing.T, root, script string) (string, error) {
 	t.Helper()
-	script = strings.NewReplacer("/var/lib/", root+"/var/lib/", "/etc/", root+"/etc/", "sudo ", "").Replace(script)
+	script = strings.NewReplacer("/var/lib/", root+"/var/lib/", "/etc/", root+"/etc/", "sudo ", "",
+		"/Users", root+"/Users", "/Volumes", root+"/Volumes", "/private", root+"/private").Replace(script)
 	out, err := exec.Command("sh", "-c", script).CombinedOutput()
 	return string(out), err
 }
@@ -85,6 +86,11 @@ func TestReadyProbeAndLegacyMigration(t *testing.T) {
 	write("var/lib/hat-firstboot-id", "an-earlier-boot\n")
 	write("etc/sysctl.d/90-hat.conf", "sysctl\n")
 	write("etc/ssh/sshd_config.d/90-hat.conf", "sshd\n")
+	// Old mount points: empty ones go, anything with content stays.
+	for _, d := range []string{"Users/yikzero/code/proj", "Volumes/Data", "private/tmp/x"} {
+		os.MkdirAll(filepath.Join(root, d), 0o755)
+	}
+	write("Users/someone/notes.txt", "keep\n")
 	if out, err := guestSh(t, root, ReadyProbe); err != nil || out != "mid\n" {
 		t.Fatalf("legacy VM not ready: %q %v", out, err)
 	}
@@ -97,6 +103,14 @@ func TestReadyProbeAndLegacyMigration(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(root, p)); err != nil {
 			t.Errorf("not migrated: %v", err)
 		}
+	}
+	for _, p := range []string{"/Users/yikzero", "/Volumes", "/private"} {
+		if _, err := os.Stat(filepath.Join(root, p)); err == nil {
+			t.Errorf("empty legacy mount point left: %s", p)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "Users/someone/notes.txt")); err != nil {
+		t.Errorf("non-empty directory removed: %v", err)
 	}
 	for _, p := range []string{legacyProvisionedMarker, legacyFirstBootMarker, legacySysctlConf, legacySSHDConf} {
 		if _, err := os.Stat(filepath.Join(root, p)); err == nil {

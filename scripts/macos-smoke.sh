@@ -72,21 +72,34 @@ fi
 
 if [ "$LITE_ONLY" = 0 ]; then
   echo "== vm mode"
-  if "$HAT" create smoke-vm --proxy "$PROXY" --tz Asia/Tokyo --locale ja_JP.UTF-8 --hostname smoke-box --share "$WORK" ${EXTRA[@]+"${EXTRA[@]}"} </dev/null >/dev/null; then
+  REAL="$(cd "$WORK" && pwd -P)"   # /private/tmp/... on macOS
+  # A share nested in another one through an absolute symlink.
+  mkdir -p "$WORK/nested-real" && ln -s "$REAL/nested-real" "$WORK/nested-link"
+  if "$HAT" create smoke-vm --proxy "$PROXY" --tz Asia/Tokyo --locale ja_JP.UTF-8 --hostname smoke-box --share "$WORK" --share "$WORK/nested-link" ${EXTRA[@]+"${EXTRA[@]}"} </dev/null >/dev/null; then
     ok "create vm profile"
     t0=$(now); "$HAT" start smoke-vm && ok "first boot ($(python3 -c "print(round($(now)-$t0))" 2>/dev/null)s)" || bad "first boot (see: $HAT debug-bundle smoke-vm)"
     "$HAT" check smoke-vm && ok "hat check smoke-vm" || bad "hat check smoke-vm (see above)"
     t0=$(now); out=$("$HAT" run smoke-vm -- echo warm); [ "$out" = warm ] && ok "warm exec ($(python3 -c "print(round(($(now)-$t0)*1000))" 2>/dev/null) ms)" || bad "warm exec: $out"
     expect_code "exit code passthrough" 42 "$HAT" run smoke-vm -- sh -c 'exit 42'
     out=$(echo hello | "$HAT" run smoke-vm -- cat); [ "$out" = hello ] && ok "stdin pipe" || bad "stdin pipe: $out"
-    GUEST_WORK="/mnt/host$WORK"   # outside the home directory: /mnt/host + host path
+    GUEST_WORK="/mnt/host$REAL"   # outside the home directory: /mnt/host + real host path
     out=$("$HAT" run smoke-vm -- sh -c 'echo "$TZ $LANG $(pwd)"'); [ "$out" = "Asia/Tokyo ja_JP.UTF-8 $GUEST_WORK" ] && ok "TZ/LANG/cwd" || bad "TZ/LANG/cwd: $out"
-    out=$("$HAT" run smoke-vm -- sh -c 'cat /var/lib/cloud/data/instance-id; env | grep -c "^HAT_"; grep -c /Users/ /proc/mounts; awk "\$3==\"virtiofs\"{print \$1}" /proc/mounts | grep -c "^hat"; ls -d /var/lib/hat-* /etc/sysctl.d/*hat* /etc/ssh/sshd_config.d/*hat* 2>/dev/null | wc -l | tr -d " "' 2>&1)
-    [ "$out" = "$(printf 'iid-local01\n0\n0\n0\n0')" ] && ok "no hat traces in the guest" || bad "hat traces in the guest (instance-id, HAT_ env, /Users mounts, hat tags, hat files): $(echo $out)"
+    out=$("$HAT" run smoke-vm -- sh -c 'cat /var/lib/cloud/data/instance-id; env | grep -c "^HAT_"; grep -c /Users/ /proc/mounts; ls -d /Users /Volumes /private 2>/dev/null | wc -l | tr -d " "; awk "\$3==\"virtiofs\"{print \$1}" /proc/mounts | grep -c "^hat"; ls -d /var/lib/hat-* /etc/sysctl.d/*hat* /etc/ssh/sshd_config.d/*hat* 2>/dev/null | wc -l | tr -d " "' 2>&1)
+    [ "$out" = "$(printf 'iid-local01\n0\n0\n0\n0\n0')" ] && ok "no hat traces in the guest" || bad "hat traces in the guest (instance-id, HAT_ env, /Users mounts, macOS dirs, hat tags, hat files): $(echo $out)"
+    out=$(cd "$WORK/nested-link" && "$HAT" run smoke-vm -- pwd 2>&1); [ "$out" = "$GUEST_WORK/nested-real" ] && ok "share nested through an absolute symlink" || bad "nested symlink share: $out"
+    if command -v git >/dev/null && "$HAT" run smoke-vm -- sh -c 'command -v git' >/dev/null 2>&1; then
+      git -C "$WORK" init -q repo && git -C "$WORK/repo" -c user.name=s -c user.email=s@example.com commit -q --allow-empty -m init &&
+        git -C "$WORK/repo" worktree add -q "$WORK/repo-wt" 2>/dev/null
+      before=$(cat "$WORK/repo-wt/.git" 2>/dev/null)
+      out=$(cd "$WORK/repo-wt" && "$HAT" run smoke-vm -- sh -c 'git status --short --branch >/dev/null && echo git-ok && grep -c /Users/ .git' 2>&1)
+      [ "$out" = "$(printf 'git-ok\n0')" ] && ok "git worktree in the VM" || bad "git worktree in the VM: $(echo $out)"
+      [ "$(cat "$WORK/repo-wt/.git" 2>/dev/null)" = "$before" ] && ok "worktree .git on the Mac unchanged" || bad "worktree .git on the Mac changed: $(cat "$WORK/repo-wt/.git")"
+    else
+      echo "  skip  git worktree (git missing on the Mac or in the VM)"
+    fi
     "$HAT" run smoke-vm -- sh -c 'echo from-vm > file-from-vm'; [ "$(cat file-from-vm 2>/dev/null)" = from-vm ] && ok "write to shared dir" || bad "write to shared dir"
     owner=$(stat -f %u file-from-vm 2>/dev/null); [ "$owner" = "$(id -u)" ] && ok "file owner is you ($owner)" || bad "file owner $owner"
     expect_code "unshared cwd refused" 125 sh -c "cd / && '$HAT' run smoke-vm -- true"
-    REAL="$(cd "$WORK" && pwd -P)"   # /private/tmp/... on macOS
     out=$(cd "$REAL" && env -u PWD "$HAT" run smoke-vm -- sh -c 'echo "$PWD"' 2>/dev/null)
     [ "$out" = "$GUEST_WORK" ] && ok "cwd via symlink alias ($REAL) maps to the share" || bad "cwd via symlink alias: got '$out', want '$GUEST_WORK'"
     "$HAT" stop smoke-vm >/dev/null && ok "stop" || bad "stop"

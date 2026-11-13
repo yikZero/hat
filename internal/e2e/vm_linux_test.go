@@ -183,7 +183,8 @@ func (h *harness) daemonLog() string {
 
 // A share configured through a symlink alias (macOS: /tmp -> /private/tmp)
 // must match a cwd given as the real path, and the command must run in the
-// guest under the mount of the share's configured path.
+// guest under the mount of the share's real path (a symlink on the way
+// would lead to a macOS path in the guest).
 func TestVMSharedThroughSymlinkAlias(t *testing.T) {
 	h := setup(t)
 	root := filepath.Dir(h.share)
@@ -209,7 +210,7 @@ func TestVMSharedThroughSymlinkAlias(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run from real path: %v %s", err, out)
 	}
-	if got := strings.TrimSpace(string(out)); got != "/home/dev/proj-alias/sub" {
-		t.Fatalf("guest cwd %q, want %q", got, "/home/dev/proj-alias/sub")
+	if got := strings.TrimSpace(string(out)); got != "/home/dev/private-proj/sub" {
+		t.Fatalf("guest cwd %q, want %q", got, "/home/dev/private-proj/sub")
 	}
 }

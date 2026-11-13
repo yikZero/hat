@@ -365,10 +365,15 @@ const (
 // GuestHome is the guest user's home directory.
 func (p *Profile) GuestHome() string { return "/home/" + p.VM.Username }
 
-// GuestMount returns where a share (a cleaned, ~-expanded host path as
-// returned by ExpandedShares) is mounted inside the VM. Host paths are not
-// reused, so the macOS account name in /Users/<name> never reaches the guest
-// (programs report their working directory):
+// GuestMount returns where a share (a host path as returned by
+// ExpandedShares; ~ is expanded) is mounted inside the VM. Host paths are
+// not reused, so the macOS account name in /Users/<name> never reaches the
+// guest (programs report their working directory).
+//
+// The mount point is derived from the share's real path (symlinks
+// resolved). A share nested in another one is then mounted on a real
+// directory of the outer share: a symlink on the way would be visible in
+// the guest with its macOS target, which does not exist there.
 //
 //	below the host home  -> same relative path below the guest home
 //	                        (~/code/x -> /home/<user>/code/x)
@@ -385,7 +390,7 @@ func (p *Profile) GuestMount(hostPath string) string {
 	} else if rest, ok := strings.CutPrefix(hostPath, "~/"); ok {
 		hostPath = filepath.Join(uh, rest)
 	}
-	return guestMount(filepath.Clean(hostPath), filepath.Clean(uh), p.GuestHome())
+	return guestMount(realPath(filepath.Clean(hostPath)), realPath(filepath.Clean(uh)), p.GuestHome())
 }
 
 func guestMount(hostPath, hostHome, guestHome string) string {
@@ -410,7 +415,7 @@ func guestMount(hostPath, hostHome, guestHome string) string {
 // priority use real paths only (symlinks resolved), so an alias spelling —
 // on macOS /tmp is /private/tmp — never changes which share is chosen; the
 // innermost share containing the directory wins. The result is expressed
-// under the chosen share's guest mount (GuestMount of its configured path).
+// under the chosen share's guest mount (GuestMount).
 func (p *Profile) GuestPath(hostPath string) (guest string, share Share, ok bool) {
 	shares, err := p.ExpandedShares()
 	if err != nil {

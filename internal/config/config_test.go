@@ -205,3 +205,39 @@ func TestDefaultHostname(t *testing.T) {
 		t.Fatalf("default hostname barely varies: %v", seen)
 	}
 }
+
+// Reported from the macOS retest of the guest mounts: sharing a directory
+// and an absolute symlink inside it must not put the inner mount point
+// behind that symlink, whose macOS target does not exist in the guest.
+func TestGuestMountNestedSymlinkShare(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	code := filepath.Join(home, "code")
+	inside := filepath.Join(code, "real")
+	outside := filepath.Join(root, "Volumes", "data")
+	for _, d := range []string{inside, outside} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(inside, filepath.Join(code, "link-in")); err != nil {
+		t.Skip(err)
+	}
+	os.Symlink(outside, filepath.Join(code, "link-out"))
+	t.Setenv("HOME", home)
+	p := New("x")
+	p.Share = []Share{{Path: "~/code"}, {Path: "~/code/link-in", ReadOnly: true}, {Path: "~/code/link-out"}}
+	if got := p.GuestMount(code); got != "/home/dev/code" {
+		t.Fatalf("outer: %q", got)
+	}
+	if got := p.GuestMount(filepath.Join(code, "link-in")); got != "/home/dev/code/real" {
+		t.Fatalf("symlink to inside the outer share: %q", got)
+	}
+	if got := p.GuestMount(filepath.Join(code, "link-out")); got != GuestHostRoot+outside {
+		t.Fatalf("symlink to outside: %q", got)
+	}
+	guest, s, ok := p.GuestPath(filepath.Join(code, "link-in", "sub"))
+	if !ok || !s.ReadOnly || guest != "/home/dev/code/real/sub" {
+		t.Fatalf("cwd through the symlink: %q %+v %v", guest, s, ok)
+	}
+}
