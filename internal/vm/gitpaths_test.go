@@ -114,7 +114,7 @@ func TestGitPathScriptRepoNotShared(t *testing.T) {
 func TestGitConfigScriptIdempotent(t *testing.T) {
 	root := t.TempDir()
 	os.MkdirAll(filepath.Join(root, "etc"), 0o755)
-	os.WriteFile(filepath.Join(root, "etc", "gitconfig"), []byte("[user]\n\tname = x\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "etc", "gitconfig"), []byte("[user]\n\tname = x"), 0o644) // no final newline
 	for i := 0; i < 2; i++ {
 		if out, err := guestSh(t, root, "set -e\n"+gitConfigScript); err != nil {
 			t.Fatalf("%v %s", err, out)

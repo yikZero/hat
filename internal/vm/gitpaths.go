@@ -25,7 +25,7 @@ const gitPathsDir = "/run/git-paths"
 // the guest, and automatic gc ("git worktree prune") would remove their
 // entries from the shared repository after gc.worktreePruneExpire.
 const gitConfigScript = `grep -qs 'worktreePruneExpire' /etc/gitconfig || ` +
-	`printf '[gc]\n\tworktreePruneExpire = never\n' | sudo tee -a /etc/gitconfig >/dev/null
+	`printf '\n[gc]\n\tworktreePruneExpire = never\n' | sudo tee -a /etc/gitconfig >/dev/null
 `
 
 // gitFixFunc is the guest shell function that makes file $1 read $2: it
@@ -61,6 +61,7 @@ func GitPathScript(p *config.Profile, hostDir string) (script, warning string) {
 	wtGuest, _, _ := p.GuestPath(wt)
 	q := session.Quote
 	var sb strings.Builder
+	sb.WriteString("set -e\n")
 	sb.WriteString(gitFixFunc)
 	fmt.Fprintf(&sb, "fix %s %s\n", q(wtGuest+"/.git"), q("gitdir: "+adminGuest))
 	// The back-pointer, used by "git worktree list/prune/repair".

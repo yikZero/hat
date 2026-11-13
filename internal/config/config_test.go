@@ -233,7 +233,8 @@ func TestGuestMountNestedSymlinkShare(t *testing.T) {
 	if got := p.GuestMount(filepath.Join(code, "link-in")); got != "/home/dev/code/real" {
 		t.Fatalf("symlink to inside the outer share: %q", got)
 	}
-	if got := p.GuestMount(filepath.Join(code, "link-out")); got != GuestHostRoot+outside {
+	realOutside, _ := filepath.EvalSymlinks(outside) // macOS: /var/folders -> /private/var/folders
+	if got := p.GuestMount(filepath.Join(code, "link-out")); got != GuestHostRoot+realOutside {
 		t.Fatalf("symlink to outside: %q", got)
 	}
 	guest, s, ok := p.GuestPath(filepath.Join(code, "link-in", "sub"))
