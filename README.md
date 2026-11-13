@@ -35,7 +35,7 @@ hat shell us-east
 **Not guaranteed / known limitations**
 - Shims are a convenience, not enforcement: programs started by absolute path, from an IDE or from the Dock bypass them.
 - The VM can be identified as a VM (DMI reports Apple Virtualization). vfkit generates a new GenericMachineIdentifier on every boot (readable by root only).
-- Programs in the VM still see and may report what any Linux machine has: hostname, working directory, and — when run inside a git repository — its remote URL, branch and commit. Using the same repository from two profiles links them; hat cannot hide that.
+- Programs in the VM still see and may report what any Linux machine has: hostname, working directory, and — when run inside a git repository — its remote URL, branch and commit. Using the same repository from two profiles links them; hat cannot hide that. Absolute symlinks inside shared directories show their macOS target (e.g. `/Users/<you>/…`) to anything that reads them.
 - Read-only shares (`--ro`) in vm mode are enforced inside the VM, so root in the VM can bypass them. Only directories can be shared, not single files, and changing shares requires a VM restart (`hat stop <p>`).
 - If the upstream proxy runs on your machine (e.g. a local Clash, which needs `--allow-local-upstream`), the kill switch depends on that proxy never connecting directly itself (use global mode with a fixed node).
 - With `lite` + `--allow-trustd`, the system certificate service may check revocation (OCSP/CRL) from your real IP.
@@ -82,7 +82,7 @@ Run a command in a profile (in vm mode the current directory must be shared):
 cd ~/code/project && hat run us-east -- curl -s https://ipinfo.io
 ```
 
-In vm mode shared directories are **not** mounted at their macOS path, which would carry your account name (`/Users/<you>/…`) into every program's working directory. A directory below your home is mounted at the same place below the guest home (`~/code/project` → `/home/dev/code/project`); your home itself at `/mnt/host-home`; anything else at `/mnt/host/<path>` (`/Volumes/Data` → `/mnt/host/Volumes/Data`). `hat share list <p>` shows the mapping. Relative paths work as before; absolute macOS paths in arguments do not exist in the VM. VMs started by an older hat keep the old mounts until restarted (`hat stop <p>`).
+In vm mode shared directories are **not** mounted at their macOS path, which would carry your account name (`/Users/<you>/…`) into every program's working directory. A directory below your home is mounted at the same place below the guest home (`~/code/project` → `/home/dev/code/project`); your home itself at `/mnt/host-home`; anything else at `/mnt/host/<path>` (`/Volumes/Data` → `/mnt/host/Volumes/Data`). Mounts follow real paths (symlinks resolved), so a share reached through a symlink is mounted where its target is. `hat share list <p>` shows the mapping. In a git worktree whose `.git` file points at a macOS path, `hat run` shows git the guest path instead (a bind mount inside the VM; nothing on the Mac changes); the repository must be shared too. Relative paths work as before; absolute macOS paths in arguments do not exist in the VM. VMs started by an older hat keep the old mounts until restarted (`hat stop <p>`).
 
 Open a shell in a profile:
 

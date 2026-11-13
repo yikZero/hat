@@ -102,7 +102,7 @@ func runInProfile(p *config.Profile, argv []string, o runOpts) (int, error) {
 }
 
 func runVM(p *config.Profile, argv []string, o runOpts) (int, error) {
-	dir := ""
+	dir, hostDir := "", ""
 	if !o.home {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -117,7 +117,7 @@ func runVM(p *config.Profile, argv []string, o runOpts) (int, error) {
 			}
 		}
 		if guest, _, ok := p.GuestPath(cwd); ok {
-			dir = guest
+			dir, hostDir = guest, cwd
 		} else if !o.shell {
 			return 125, clierr.New(clierr.NotShared,
 				fmt.Sprintf("%s share add %s %s   (or run in the VM home: %s run %s --home -- ...)",
@@ -148,6 +148,9 @@ func runVM(p *config.Profile, argv []string, o runOpts) (int, error) {
 		return 1, clierr.Wrap(clierr.VMFailed, "hat status "+p.Name, fmt.Errorf("connecting to the VM: %w", err))
 	}
 	defer client.Close()
+	if hostDir != "" {
+		fixGitPaths(client, p, hostDir)
+	}
 	// No HAT_ACTIVE here: there is no hat (or shim) in the guest to guard
 	// against nesting, and the variable would tell every program in the VM
 	// that it runs under hat, and in which profile.
@@ -315,4 +318,22 @@ func cut(s, sep string) (string, string, bool) {
 		}
 	}
 	return s, "", false
+}
+
+// fixGitPaths lets git work in the VM in a linked worktree whose .git file
+// points at a host path (see vm.GitPathScript). Problems are reported, not
+// fatal: without the fix only git fails, as it would anyway.
+func fixGitPaths(client *ssh.Client, p *config.Profile, hostDir string) {
+	script, warning := vm.GitPathScript(p, hostDir)
+	if warning != "" {
+		notice("%s", warning)
+	}
+	if script == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if out, err := session.Output(ctx, client, script); err != nil {
+		notice("could not map this git worktree into the VM, git may fail here: %v: %s", err, strings.TrimSpace(out))
+	}
 }

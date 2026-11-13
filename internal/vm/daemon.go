@@ -253,14 +253,22 @@ const (
 	legacySSHDConf          = "/etc/ssh/sshd_config.d/90-hat.conf"
 )
 
-// migrateGuestScript renames hat-named files left by older versions
-// (idempotent; part of the set -e reconcile script).
+// legacyMountRoots are macOS top-level directories. Older versions mounted
+// shares at their macOS path, so the guest kept empty mount points such as
+// /Users/<account>; Debian has none of these directories itself.
+var legacyMountRoots = []string{"/Users", "/Volumes", "/private"}
+
+// migrateGuestScript renames hat-named files left by older versions and
+// removes their empty mount points (idempotent; part of the set -e
+// reconcile script, which runs at boot before anything is mounted there;
+// -xdev keeps find on the root filesystem, and only empty directories go).
 var migrateGuestScript = fmt.Sprintf(`if [ -e %[1]s ]; then sudo mkdir -p %[2]s; `+
 	`[ ! -e %[3]s ] || sudo mv -f %[3]s %[4]s; sudo mv -f %[1]s %[5]s; fi
 [ ! -e %[6]s ] || sudo mv -f %[6]s %[7]s
 [ ! -e %[8]s ] || sudo mv -f %[8]s %[9]s
+for d in %[10]s; do [ ! -d "$d" ] || sudo find "$d" -xdev -depth -type d -empty -delete 2>/dev/null || true; done
 `, legacyProvisionedMarker, markerDir, legacyFirstBootMarker, FirstBootMarker, ProvisionedMarker,
-	legacySysctlConf, SysctlConf, legacySSHDConf, SSHDConf)
+	legacySysctlConf, SysctlConf, legacySSHDConf, SSHDConf, strings.Join(legacyMountRoots, " "))
 
 // ShareTag is the virtio-fs tag of the i-th share. It is visible in the
 // guest (/proc/mounts), so it is deliberately generic.
@@ -356,6 +364,7 @@ func (d *Daemon) reconcile(ctx context.Context, c *ssh.Client) error {
 	fmt.Fprintf(&sb, "[ \"$(hostname)\" = %s ] || sudo hostnamectl set-hostname %s\n", q(d.p.VM.Hostname), q(d.p.VM.Hostname))
 	fmt.Fprintf(&sb, "sudo timedatectl set-timezone %s\n", q(d.p.Timezone))
 	sb.WriteString(migrateGuestScript)
+	sb.WriteString(gitConfigScript)
 	shares, _ := d.p.ExpandedShares()
 	sb.WriteString(MountScript(d.p, shares))
 	out, err := session.Output(ctx, c, sb.String())
